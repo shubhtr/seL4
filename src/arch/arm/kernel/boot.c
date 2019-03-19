@@ -8,6 +8,7 @@
  * @TAG(GD_GPL)
  */
 
+#include <config.h>
 #include <assert.h>
 #include <kernel/boot.h>
 #include <machine/io.h>
@@ -18,10 +19,14 @@
 #include <arch/kernel/vspace.h>
 #include <arch/benchmark.h>
 #include <arch/user_access.h>
-#include <arch/linker.h>
+#include <arch/object/iospace.h>
+#include <linker.h>
 #include <plat/machine/hardware.h>
 #include <machine.h>
-
+#include <plat/machine/timer.h>
+#include <arch/machine/timer.h>
+#include <arch/machine/fpu.h>
+#include <arch/machine/tlb.h>
 
 /* pointer to the end of boot code/data in kernel image */
 /* need a fake array to get the pointer from the linker script */
@@ -29,12 +34,17 @@ extern char ki_boot_end[1];
 /* pointer to end of kernel image */
 extern char ki_end[1];
 
+#ifdef ENABLE_SMP_SUPPORT
+/* sync variable to prevent other nodes from booting
+ * until kernel data structures initialized */
+BOOT_DATA static volatile int node_boot_lock = 0;
+#endif /* ENABLE_SMP_SUPPORT */
+
 /**
  * Split mem_reg about reserved_reg. If memory exists in the lower
  * segment, insert it. If memory exists in the upper segment, return it.
  */
-BOOT_CODE static region_t
-insert_region_excluded(region_t mem_reg, region_t reserved_reg)
+BOOT_CODE static region_t insert_region_excluded(region_t mem_reg, region_t reserved_reg)
 {
     region_t residual_reg = mem_reg;
     bool_t result UNUSED;
@@ -69,10 +79,24 @@ insert_region_excluded(region_t mem_reg, region_t reserved_reg)
     return residual_reg;
 }
 
-BOOT_CODE static void
-init_freemem(region_t ui_reg)
+BOOT_CODE static region_t get_reserved_region(int i, pptr_t res_reg_end)
 {
-    unsigned int i;
+    region_t res_reg = mode_reserved_region[i];
+
+    /* Force ordering and exclusivity of reserved regions. */
+    assert(res_reg.start < res_reg.end);
+    assert(res_reg_end <= res_reg.start);
+    return res_reg;
+}
+
+BOOT_CODE static int get_num_reserved_region(void)
+{
+    return sizeof(mode_reserved_region) / sizeof(region_t);
+}
+
+BOOT_CODE static void init_freemem(region_t ui_reg)
+{
+    word_t i;
     bool_t result UNUSED;
     region_t cur_reg;
     region_t res_reg[] = {
@@ -84,10 +108,6 @@ init_freemem(region_t ui_reg)
             .start = ui_reg.start,
             .end = ui_reg.end
         },
-        {
-            .start = (PD_ASID_SLOT + 0) << pageBitsForSize(ARMSection),
-            .end   = (PD_ASID_SLOT + 1) << pageBitsForSize(ARMSection)
-        }
     };
 
     for (i = 0; i < MAX_NUM_FREEMEM_REG; i++) {
@@ -97,24 +117,29 @@ init_freemem(region_t ui_reg)
     /* Force ordering and exclusivity of reserved regions. */
     assert(res_reg[0].start < res_reg[0].end);
     assert(res_reg[1].start < res_reg[1].end);
-    assert(res_reg[2].start < res_reg[2].end);
     assert(res_reg[0].end  <= res_reg[1].start);
-    assert(res_reg[1].end  <= res_reg[2].start);
     for (i = 0; i < get_num_avail_p_regs(); i++) {
         cur_reg = paddr_to_pptr_reg(get_avail_p_reg(i));
         /* Adjust region if it exceeds the kernel window
          * Note that we compare physical address in case of overflow.
          */
-        if (pptr_to_paddr((void*)cur_reg.end) > PADDR_TOP) {
+        if (pptr_to_paddr((void *)cur_reg.end) > PADDR_TOP) {
             cur_reg.end = PPTR_TOP;
         }
-        if (pptr_to_paddr((void*)cur_reg.start) > PADDR_TOP) {
+        if (pptr_to_paddr((void *)cur_reg.start) > PADDR_TOP) {
             cur_reg.start = PPTR_TOP;
         }
 
         cur_reg = insert_region_excluded(cur_reg, res_reg[0]);
         cur_reg = insert_region_excluded(cur_reg, res_reg[1]);
-        cur_reg = insert_region_excluded(cur_reg, res_reg[2]);
+
+        /* Check any reserved mode specific reagion */
+        region_t mode_res_reg = res_reg[1];
+        for (int m = 0; m < get_num_reserved_region(); m++) {
+            mode_res_reg = get_reserved_region(i, mode_res_reg.end);
+            cur_reg = insert_region_excluded(cur_reg, mode_res_reg);
+        }
+
         if (cur_reg.start != cur_reg.end) {
             result = insert_region(cur_reg);
             assert(result);
@@ -122,8 +147,7 @@ init_freemem(region_t ui_reg)
     }
 }
 
-BOOT_CODE static void
-init_irqs(cap_t root_cnode_cap)
+BOOT_CODE static void init_irqs(cap_t root_cnode_cap)
 {
     irq_t i;
 
@@ -131,203 +155,208 @@ init_irqs(cap_t root_cnode_cap)
         setIRQState(IRQInactive, i);
     }
     setIRQState(IRQTimer, KERNEL_TIMER_IRQ);
+#ifdef CONFIG_ARM_HYPERVISOR_SUPPORT
+    setIRQState(IRQReserved, INTERRUPT_VGIC_MAINTENANCE);
+#endif
+#ifdef CONFIG_ARM_SMMU
+    setIRQState(IRQReserved, INTERRUPT_SMMU);
+#endif
+
+#ifdef CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT
+#ifdef KERNEL_PMU_IRQ
+    setIRQState(IRQReserved, KERNEL_PMU_IRQ);
+#if (defined CONFIG_PLAT_TX1 && defined ENABLE_SMP_SUPPORT)
+//SELFOUR-1252
+#error "This platform doesn't support tracking CPU utilisation on multicore"
+#endif /* CONFIG_PLAT_TX1 && ENABLE_SMP_SUPPORT */
+#else
+#error "This platform doesn't support tracking CPU utilisation feature"
+#endif /* KERNEL_TIMER_IRQ */
+#endif /* CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT */
+
+#ifdef ENABLE_SMP_SUPPORT
+    setIRQState(IRQIPI, irq_remote_call_ipi);
+    setIRQState(IRQIPI, irq_reschedule_ipi);
+#endif /* ENABLE_SMP_SUPPORT */
 
     /* provide the IRQ control cap */
-    write_slot(SLOT_PTR(pptr_of_cap(root_cnode_cap), BI_CAP_IRQ_CTRL), cap_irq_control_cap_new());
+    write_slot(SLOT_PTR(pptr_of_cap(root_cnode_cap), seL4_CapIRQControl), cap_irq_control_cap_new());
 }
 
-/* Create a frame cap for the initial thread. */
-
-static BOOT_CODE cap_t
-create_it_frame_cap(pptr_t pptr, vptr_t vptr, asid_t asid, bool_t use_large)
+BOOT_CODE static bool_t create_untypeds(cap_t root_cnode_cap, region_t boot_mem_reuse_reg)
 {
-    if (use_large)
-        return
-            cap_frame_cap_new(
-                ARMSection,                    /* capFSize           */
-                ASID_LOW(asid),                /* capFMappedASIDLow  */
-                wordFromVMRights(VMReadWrite), /* capFVMRights       */
-                vptr,                          /* capFMappedAddress  */
-                ASID_HIGH(asid),               /* capFMappedASIDHigh */
-                pptr                           /* capFBasePtr        */
-            );
-    else
-        return
-            cap_small_frame_cap_new(
-                ASID_LOW(asid),                /* capFMappedASIDLow  */
-                wordFromVMRights(VMReadWrite), /* capFVMRights       */
-                vptr,                          /* capFMappedAddress  */
-                ASID_HIGH(asid),               /* capFMappedASIDHigh */
-                pptr                           /* capFBasePtr        */
-            );
-}
+    seL4_SlotPos   slot_pos_before;
+    seL4_SlotPos   slot_pos_after;
+    region_t       dev_reg;
+    word_t         i;
 
-BOOT_CODE cap_t
-create_unmapped_it_frame_cap(pptr_t pptr, bool_t use_large)
-{
-    return create_it_frame_cap(pptr, 0, asidInvalid, use_large);
-}
-
-BOOT_CODE cap_t
-create_mapped_it_frame_cap(cap_t pd_cap, pptr_t pptr, vptr_t vptr, asid_t asid, bool_t use_large, bool_t executable)
-{
-    cap_t cap = create_it_frame_cap(pptr, vptr, asid, use_large);
-    map_it_frame_cap(pd_cap, cap, executable);
-    return cap;
-}
-
-/* Create a page table for the initial thread */
-
-static BOOT_CODE cap_t
-create_it_page_table_cap(cap_t pd, pptr_t pptr, vptr_t vptr, asid_t asid)
-{
-    cap_t cap;
-    cap = cap_page_table_cap_new(
-              1,    /* capPTIsMapped      */
-              asid, /* capPTMappedASID    */
-              vptr, /* capPTMappedAddress */
-              pptr  /* capPTBasePtr       */
-          );
-    if (asid != asidInvalid) {
-        map_it_pt_cap(pd, cap);
-    }
-    return cap;
-}
-
-/* Create an address space for the initial thread.
- * This includes page directory and page tables */
-BOOT_CODE static cap_t
-create_it_address_space(cap_t root_cnode_cap, v_region_t it_v_reg)
-{
-    cap_t      pd_cap;
-    vptr_t     pt_vptr;
-    pptr_t     pt_pptr;
-    slot_pos_t slot_pos_before;
-    slot_pos_t slot_pos_after;
-    pptr_t pd_pptr;
-
-    /* create PD obj and cap */
-    pd_pptr = alloc_region(PD_SIZE_BITS);
-    if (!pd_pptr) {
-        return cap_null_cap_new();
-    }
-    memzero(PDE_PTR(pd_pptr), 1 << PD_SIZE_BITS);
-    copyGlobalMappings(PDE_PTR(pd_pptr));
-    cleanCacheRange_PoU(pd_pptr, pd_pptr + (1 << PD_SIZE_BITS) - 1,
-                        addrFromPPtr((void *)pd_pptr));
-    pd_cap =
-        cap_page_directory_cap_new(
-            true,    /* capPDIsMapped   */
-            IT_ASID, /* capPDMappedASID */
-            pd_pptr  /* capPDBasePtr    */
-        );
-    write_slot(SLOT_PTR(pptr_of_cap(root_cnode_cap), BI_CAP_IT_VSPACE), pd_cap);
-
-    /* create all PT objs and caps necessary to cover userland image */
     slot_pos_before = ndks_boot.slot_pos_cur;
-
-    for (pt_vptr = ROUND_DOWN(it_v_reg.start, PT_BITS + PAGE_BITS);
-            pt_vptr < it_v_reg.end;
-            pt_vptr += BIT(PT_BITS + PAGE_BITS)) {
-        pt_pptr = alloc_region(PT_SIZE_BITS);
-        if (!pt_pptr) {
-            return cap_null_cap_new();
-        }
-        memzero(PTE_PTR(pt_pptr), 1 << PT_SIZE_BITS);
-        if (!provide_cap(root_cnode_cap,
-                         create_it_page_table_cap(pd_cap, pt_pptr, pt_vptr, IT_ASID))
-           ) {
-            return cap_null_cap_new();
+    create_kernel_untypeds(root_cnode_cap, boot_mem_reuse_reg, slot_pos_before);
+    UNUSED paddr_t current_region_pos = 0;
+    for (i = 0; i < get_num_dev_p_regs(); i++) {
+        /* It is required that untyped regions are non-overlapping.
+         * We assume that hardware regions are defined in ascending order to make
+         * overlapping checks simpler
+         */
+        assert(get_dev_p_reg(i).start >= current_region_pos);
+        current_region_pos = get_dev_p_reg(i).end;
+        dev_reg = paddr_to_pptr_reg(get_dev_p_reg(i));
+        if (!create_untypeds_for_region(root_cnode_cap, true,
+                                        dev_reg, slot_pos_before)) {
+            return false;
         }
     }
 
     slot_pos_after = ndks_boot.slot_pos_cur;
-    ndks_boot.bi_frame->ui_pt_caps = (slot_region_t) {
+    ndks_boot.bi_frame->untyped = (seL4_SlotRegion) {
         slot_pos_before, slot_pos_after
     };
+    return true;
 
-    return pd_cap;
 }
 
-BOOT_CODE static bool_t
-create_device_frames(cap_t root_cnode_cap)
+/** This and only this function initialises the CPU.
+ *
+ * It does NOT initialise any kernel state.
+ * @return For the verification build, this currently returns true always.
+ */
+BOOT_CODE static bool_t init_cpu(void)
 {
-    slot_pos_t     slot_pos_before;
-    slot_pos_t     slot_pos_after;
-    vm_page_size_t frame_size;
-    region_t       dev_reg;
-    bi_dev_reg_t   bi_dev_reg;
-    cap_t          frame_cap;
-    uint32_t       i;
-    pptr_t         f;
+    bool_t haveHWFPU;
 
-    ndks_boot.bi_frame->num_dev_regs = get_num_dev_p_regs();
-    if (ndks_boot.bi_frame->num_dev_regs > CONFIG_MAX_NUM_BOOTINFO_DEVICE_REGIONS) {
-        printf("Kernel init: Too many device regions for boot info\n");
-        ndks_boot.bi_frame->num_dev_regs = CONFIG_MAX_NUM_BOOTINFO_DEVICE_REGIONS;
+#ifdef CONFIG_ARCH_AARCH64
+    if (config_set(CONFIG_ARM_HYPERVISOR_SUPPORT)) {
+        if (!checkTCR_EL2()) {
+            return false;
+        }
+    }
+#endif
+
+    activate_global_pd();
+    if (config_set(CONFIG_ARM_HYPERVISOR_SUPPORT)) {
+        vcpu_boot_init();
     }
 
-    for (i = 0; i < ndks_boot.bi_frame->num_dev_regs; i++) {
-        /* write the frame caps of this device region into the root CNode and update the bootinfo */
-        dev_reg = paddr_to_pptr_reg(get_dev_p_reg(i));
-        /* use 1M frames if possible, otherwise use 4K frames */
-        if (IS_ALIGNED(dev_reg.start, pageBitsForSize(ARMSection)) &&
-                IS_ALIGNED(dev_reg.end,   pageBitsForSize(ARMSection))) {
-            frame_size = ARMSection;
-        } else {
-            frame_size = ARMSmallPage;
-        }
-
-        slot_pos_before = ndks_boot.slot_pos_cur;
-
-        /* create/provide frame caps covering the region */
-        for (f = dev_reg.start; f < dev_reg.end; f += BIT(pageBitsForSize(frame_size))) {
-            frame_cap = create_it_frame_cap(f, 0, asidInvalid, frame_size == ARMSection);
-            if (!provide_cap(root_cnode_cap, frame_cap)) {
-                return false;
-            }
-        }
-
-        slot_pos_after = ndks_boot.slot_pos_cur;
-
-        /* add device-region entry to bootinfo */
-        bi_dev_reg.base_paddr = pptr_to_paddr((void*)dev_reg.start);
-        bi_dev_reg.frame_size_bits = pageBitsForSize(frame_size);
-        bi_dev_reg.frame_caps = (slot_region_t) {
-            slot_pos_before, slot_pos_after
-        };
-        ndks_boot.bi_frame->dev_reg_list[i] = bi_dev_reg;
+#ifdef CONFIG_HARDWARE_DEBUG_API
+    if (!Arch_initHardwareBreakpoints()) {
+        printf("Kernel built with CONFIG_HARDWARE_DEBUG_API, but this board doesn't "
+               "reliably support it.\n");
+        return false;
     }
+#endif
+
+    /* Setup kernel stack pointer.
+     * On ARM SMP, the array index here is the CPU ID
+     */
+#ifndef CONFIG_ARCH_ARM_V6
+    word_t stack_top = ((word_t) kernel_stack_alloc[SMP_TERNARY(getCurrentCPUIndex(), 0)]) + BIT(CONFIG_KERNEL_STACK_BITS);
+#if defined(ENABLE_SMP_SUPPORT) && defined(CONFIG_ARCH_AARCH64)
+    /* the least 12 bits are used to store logical core ID */
+    stack_top |= getCurrentCPUIndex();
+#endif
+    setKernelStack(stack_top);
+#endif /* CONFIG_ARCH_ARM_V6 */
+
+#ifdef CONFIG_ARCH_AARCH64
+    /* initialise CPU's exception vector table */
+    setVtable((pptr_t)arm_vector_table);
+#endif /* CONFIG_ARCH_AARCH64 */
+
+    haveHWFPU = fpsimd_HWCapTest();
+
+    /* Disable FPU to avoid channels where a platform has an FPU but doesn't make use of it */
+    if (haveHWFPU) {
+        disableFpu();
+    }
+
+#ifdef CONFIG_HAVE_FPU
+    if (haveHWFPU) {
+        if (!fpsimd_init()) {
+            return false;
+        }
+    } else {
+        printf("Platform claims to have FP hardware, but does not!");
+        return false;
+    }
+#endif /* CONFIG_HAVE_FPU */
+
+    cpu_initLocalIRQController();
+
+#ifdef CONFIG_ENABLE_BENCHMARKS
+    armv_init_ccnt();
+#endif /* CONFIG_ENABLE_BENCHMARKS */
+
+    /* Export selected CPU features for access by PL0 */
+    armv_init_user_access();
+
+    initTimer();
 
     return true;
 }
 
-/* This and only this function initialises the CPU. It does NOT initialise any kernel state. */
-
-BOOT_CODE static void
-init_cpu(void)
-{
-    activate_global_pd();
-}
-
 /* This and only this function initialises the platform. It does NOT initialise any kernel state. */
 
-BOOT_CODE static void
-init_plat(void)
+BOOT_CODE static void init_plat(void)
 {
     initIRQController();
-    initTimer();
     initL2Cache();
 }
 
+#ifdef ENABLE_SMP_SUPPORT
+BOOT_CODE static bool_t try_init_kernel_secondary_core(void)
+{
+    /* need to first wait until some kernel init has been done */
+    while (!node_boot_lock);
+
+    /* Perform cpu init */
+    init_cpu();
+
+    /* Enable per-CPU timer interrupts */
+    maskInterrupt(false, KERNEL_TIMER_IRQ);
+
+    NODE_LOCK_SYS;
+
+    ksNumCPUs++;
+
+    init_core_state(SchedulerAction_ResumeCurrentThread);
+
+    return true;
+}
+
+BOOT_CODE static void release_secondary_cpus(void)
+{
+
+    /* release the cpus at the same time */
+    node_boot_lock = 1;
+
+#ifndef CONFIG_ARCH_AARCH64
+    /* At this point in time the other CPUs do *not* have the seL4 global pd set.
+     * However, they still have a PD from the elfloader (which is mapping mmemory
+     * as strongly ordered uncached, as a result we need to explicitly clean
+     * the cache for it to see the update of node_boot_lock
+     *
+     * For ARMv8, the elfloader sets the page table entries as inner shareable
+     * (so is the attribute of the seL4 global PD) when SMP is enabled, and
+     * turns on the cache. Thus, we do not need to clean and invaliate the cache.
+     */
+    cleanInvalidateL1Caches();
+    plat_cleanInvalidateL2Cache();
+#endif
+
+    /* Wait until all the secondary cores are done initialising */
+    while (ksNumCPUs != CONFIG_MAX_NUM_NODES) {
+        /* perform a memory release+acquire to get new values of ksNumCPUs */
+        __atomic_signal_fence(__ATOMIC_ACQ_REL);
+    }
+}
+#endif /* ENABLE_SMP_SUPPORT */
+
 /* Main kernel initialisation function. */
 
-
-static BOOT_CODE bool_t
-try_init_kernel(
+static BOOT_CODE bool_t try_init_kernel(
     paddr_t ui_p_reg_start,
     paddr_t ui_p_reg_end,
-    int32_t pv_offset,
+    sword_t pv_offset,
     vptr_t  v_entry
 )
 {
@@ -356,11 +385,18 @@ try_init_kernel(
     it_v_reg.start = ui_v_reg.start;
     it_v_reg.end = bi_frame_vptr + BIT(PAGE_BITS);
 
+    if (it_v_reg.end > kernelBase) {
+        printf("Userland image virtual end address too high\n");
+        return false;
+    }
+
     /* setup virtual memory for the kernel */
     map_kernel_window();
 
     /* initialise the CPU */
-    init_cpu();
+    if (!init_cpu()) {
+        return false;
+    }
 
     /* debug output via serial port is only available from here */
     printf("Bootstrapping kernel\n");
@@ -389,9 +425,19 @@ try_init_kernel(
     init_irqs(root_cnode_cap);
 
     /* create the bootinfo frame */
-    bi_frame_pptr = allocate_bi_frame(0, 1, ipcbuf_vptr);
+    bi_frame_pptr = allocate_bi_frame(0, CONFIG_MAX_NUM_NODES, ipcbuf_vptr);
     if (!bi_frame_pptr) {
         return false;
+    }
+
+    if (config_set(CONFIG_ARM_SMMU)) {
+        ndks_boot.bi_frame->ioSpaceCaps = create_iospace_caps(root_cnode_cap);
+        if (ndks_boot.bi_frame->ioSpaceCaps.start == 0 &&
+            ndks_boot.bi_frame->ioSpaceCaps.end == 0) {
+            return false;
+        }
+    } else {
+        ndks_boot.bi_frame->ioSpaceCaps = S_REG_EMPTY;
     }
 
     /* Construct an initial address space with enough virtual addresses
@@ -427,7 +473,7 @@ try_init_kernel(
     if (!create_frames_ret.success) {
         return false;
     }
-    ndks_boot.bi_frame->ui_frame_caps = create_frames_ret.region;
+    ndks_boot.bi_frame->userImageFrames = create_frames_ret.region;
 
     /* create/initialise the initial thread's ASID pool */
     it_ap_cap = create_it_asid_pool(root_cnode_cap);
@@ -448,34 +494,33 @@ try_init_kernel(
     cleanInvalidateL1Caches();
 
     /* create the initial thread */
-    if (!create_initial_thread(
-                root_cnode_cap,
-                it_pd_cap,
-                v_entry,
-                bi_frame_vptr,
-                ipcbuf_vptr,
-                ipcbuf_cap
-            )) {
+    tcb_t *initial = create_initial_thread(
+                         root_cnode_cap,
+                         it_pd_cap,
+                         v_entry,
+                         bi_frame_vptr,
+                         ipcbuf_vptr,
+                         ipcbuf_cap
+                     );
+
+    if (initial == NULL) {
         return false;
     }
 
-    /* convert the remaining free memory into UT objects and provide the caps */
+    init_core_state(initial);
+
+    /* create all of the untypeds. Both devices and kernel window memory */
     if (!create_untypeds(
-                root_cnode_cap,
+            root_cnode_cap,
     (region_t) {
     kernelBase, (pptr_t)ki_boot_end
     } /* reusable boot code/data */
-            )) {
-        return false;
-    }
-
-    /* create device frames */
-    if (!create_device_frames(root_cnode_cap)) {
+        )) {
         return false;
     }
 
     /* no shared-frame caps (ARM has no multikernel support) */
-    ndks_boot.bi_frame->sh_frame_caps = S_REG_EMPTY;
+    ndks_boot.bi_frame->sharedFrames = S_REG_EMPTY;
 
     /* finalise the bootinfo frame */
     bi_finalise();
@@ -484,34 +529,60 @@ try_init_kernel(
      * strictly neccessary, but performance is not critical here so clean and invalidate
      * everything to PoC */
     cleanInvalidateL1Caches();
+    invalidateLocalTLB();
+    if (config_set(CONFIG_ARM_HYPERVISOR_SUPPORT)) {
+        invalidateHypTLB();
+    }
 
-#ifdef CONFIG_BENCHMARK
-    armv_init_ccnt();
-#endif /* CONFIG_BENCHMARK */
 
-    /* Export selected CPU features for access by PL0 */
-    armv_init_user_access();
+    ksNumCPUs = 1;
+
+    /* initialize BKL before booting up other cores */
+    SMP_COND_STATEMENT(clh_lock_init());
+    SMP_COND_STATEMENT(release_secondary_cpus());
+
+    /* grab BKL before leaving the kernel */
+    NODE_LOCK_SYS;
+
+    printf("Booting all finished, dropped to user space\n");
 
     /* kernel successfully initialized */
     return true;
 }
 
-BOOT_CODE VISIBLE void
-init_kernel(
+BOOT_CODE VISIBLE void init_kernel(
     paddr_t ui_p_reg_start,
     paddr_t ui_p_reg_end,
-    int32_t pv_offset,
+    sword_t pv_offset,
     vptr_t  v_entry
 )
 {
     bool_t result;
 
+#ifdef ENABLE_SMP_SUPPORT
+    /* we assume there exists a cpu with id 0 and will use it for bootstrapping */
+    if (getCurrentCPUIndex() == 0) {
+        result = try_init_kernel(ui_p_reg_start,
+                                 ui_p_reg_end,
+                                 pv_offset,
+                                 v_entry);
+    } else {
+        result = try_init_kernel_secondary_core();
+    }
+
+#else
     result = try_init_kernel(ui_p_reg_start,
                              ui_p_reg_end,
                              pv_offset,
                              v_entry);
+
+#endif /* ENABLE_SMP_SUPPORT */
+
     if (!result) {
-        fail ("Kernel init failed for some reason :(");
+        fail("Kernel init failed for some reason :(");
     }
+
+    schedule();
+    activateThread();
 }
 

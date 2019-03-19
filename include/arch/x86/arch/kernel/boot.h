@@ -13,46 +13,45 @@
 
 #include <config.h>
 #include <types.h>
+#include <plat/machine/acpi.h>
+#include <kernel/boot.h>
+#include <arch/api/bootinfo_types.h>
 
-typedef struct dev_p_regs {
-    uint32_t count;
-    p_region_t list[CONFIG_MAX_NUM_BOOTINFO_DEVICE_REGIONS];
-} dev_p_regs_t;
+typedef struct mem_p_regs {
+    word_t count;
+    p_region_t list[MAX_NUM_FREEMEM_REG];
+} mem_p_regs_t;
 
 typedef struct ui_info {
     p_region_t p_reg;     /* region where the userland image lies in */
-    int32_t    pv_offset; /* UI virtual address + pv_offset = UI physical address */
+    sword_t    pv_offset; /* UI virtual address + pv_offset = UI physical address */
     vptr_t     v_entry;   /* entry point (virtual address) of userland image */
 } ui_info_t;
 
 cap_t create_unmapped_it_frame_cap(pptr_t pptr, bool_t use_large);
-cap_t create_mapped_it_frame_cap(cap_t pd_cap, pptr_t pptr, vptr_t vptr, asid_t asid, bool_t use_large, bool_t executable);
+cap_t create_mapped_it_frame_cap(cap_t pd_cap, pptr_t pptr, vptr_t vptr, asid_t asid, bool_t use_large,
+                                 bool_t executable);
 
-bool_t init_node_state(
-    p_region_t    avail_p_reg,
-    p_region_t    sh_p_reg,
-    dev_p_regs_t* dev_p_regs,
+bool_t init_sys_state(
+    cpu_id_t      cpu_id,
+    mem_p_regs_t  mem_p_regs,
     ui_info_t     ui_info,
     p_region_t    boot_mem_reuse_p_reg,
-    node_id_t     node_id,
-    uint32_t      num_nodes,
     /* parameters below not modeled in abstract specification */
-    pdpte_t*      kernel_pdpt,
-    pde_t*        kernel_pd,
-    pte_t*        kernel_pt
-#ifdef CONFIG_IOMMU
-    , cpu_id_t      cpu_id,
     uint32_t      num_drhu,
-    paddr_t*      drhu_list,
-    uint32_t      num_passthrough_dev,
-    dev_id_t*     passthrough_dev_list,
-    uint32_t*     pci_bus_used_bitmap
-#endif
+    paddr_t      *drhu_list,
+    acpi_rmrr_list_t *rmrr_list,
+    acpi_rsdp_t      *acpi_rsdp,
+    seL4_X86_BootInfo_VBE *vbe,
+    seL4_X86_BootInfo_mmap_t *mb_mmap,
+    seL4_X86_BootInfo_fb_t *fb_info
 );
 
-bool_t init_node_cpu(
-    uint32_t apic_khz,
+bool_t init_cpu(
     bool_t   mask_legacy_irqs
 );
+
+bool_t add_allocated_p_region(p_region_t reg);
+void init_allocated_p_regions(void);
 
 #endif

@@ -11,27 +11,21 @@
 #ifndef ARMV_BENCHMARK_H
 #define ARMV_BENCHMARK_H
 
-#ifdef CONFIG_BENCHMARK
+#ifdef CONFIG_ENABLE_BENCHMARKS
 
-#if defined(CONFIG_PLAT_IMX6) || defined(CONFIG_PLAT_EXYNOS5410)
-#define KS_LOG_PADDR 0xffe00000
-#else
-//TODO test/implement this for other platforms
-#error "Log address unclear and untested!"
-#endif
+#define CCNT "p15, 0, %0, c9, c13, 0"
 
-static inline uint32_t
-timestamp(void)
+#ifdef CONFIG_BENCHMARK_TRACK_UTILISATION
+#ifdef CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT
+extern uint64_t ccnt_num_overflows;
+#endif /* CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT */
+static inline void benchmark_arch_utilisation_reset(void)
 {
-    int ret;
-
-    asm volatile (
-        "mrc p15, 0, %0, c9, c13, 0\n"
-        : "=r" (ret)
-    );
-
-    return ret;
+#ifdef CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT
+    ccnt_num_overflows = 0;
+#endif /* CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT */
 }
-#endif /* CONFIG_BENCHMARK */
+#endif /* CONFIG_BENCHMARK_TRACK_UTILISATION */
+#endif /* CONFIG_ENABLE_BENCHMARKS */
 
 #endif /* ARMV_BENCHMARK_H */

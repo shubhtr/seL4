@@ -8,38 +8,53 @@
  * @TAG(GD_GPL)
  */
 
-#ifdef CONFIG_BENCHMARK
+#include <config.h>
+
+#ifdef CONFIG_ENABLE_BENCHMARKS
 
 #include <arch/benchmark.h>
 
-void
-armv_init_ccnt(void)
+#ifdef CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT
+uint64_t ccnt_num_overflows;
+#endif /* CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT */
+
+void armv_init_ccnt(void)
 {
     uint32_t val, pmcr;
 
+#ifdef CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT
+    /* Enable generating interrupts on overflows */
+    val = BIT(31);
+    asm volatile(
+        "mcr p15, 0, %0, c9, c14, 1\n"
+        :
+        : "r"(val)
+    );
+#endif /* CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT */
+
     /* enable them */
     val = 1;
-    asm volatile (
+    asm volatile(
         "mcr p15, 0, %0, c9, c14, 0\n"
         :
-        : "r" (val)
+        : "r"(val)
     );
 
     /* reset to 0 and make available at user level */
     pmcr = (1 << 2) | 1;
-    asm volatile (
+    asm volatile(
         "mcr p15, 0, %0, c9, c12, 0\n"
         : /* no outputs */
-        : "r" (pmcr)
+        : "r"(pmcr)
     );
 
     /* turn the cycle counter on */
-    val = (1U << 31);
-    asm volatile (
+    val = BIT(31);
+    asm volatile(
         "mcr p15, 0, %0, c9, c12, 1\n"
         : /* no outputs */
-        : "r" (val)
+        : "r"(val)
     );
 }
 
-#endif /* CONFIG_BENCHMARK */
+#endif /* CONFIG_ENABLE_BENCHMARKS */

@@ -1,12 +1,24 @@
+<!--
+  Copyright 2017, Data61
+  Commonwealth Scientific and Industrial Research Organisation (CSIRO)
+  ABN 41 687 119 230.
+
+  This software may be distributed and modified according to the terms of
+  the GNU General Public License version 2. Note that NO WARRANTY is provided.
+  See "LICENSE_GPLv2.txt" for details.
+
+  @TAG(DATA61_GPL)
+-->
+
 Contributions to the seL4 kernel repository are welcome!
 
 
 ## CLA
 
-Please note that GD and NICTA require a contributor license agreement (CLA)
+Please note that GD and Data61 require a contributor license agreement (CLA)
 to be signed for all external contributions. Please see
-https://seL4.systems/Contributing for details (it is a fairly short and
-standard CLA).
+[1] for details (it is a fairly short
+and standard CLA).
 
 For the `seL4/seL4` repository, we can review pull requests directly on
 github if we have a signed CLA on file.
@@ -20,8 +32,11 @@ comment.
 
 ## Kernel Development Process
 
-Please read https://seL4.systems/Contributing
+In addition to our guidelines[1], the kernel has additional history requirements:
 
+* Please try to make sure every commit is in a working state to facilitate bisecting.
+    + unless there is a concrete reason, if so please state that reason in the commit message.
+* Try to keep commits small for ease of reviewing.
 
 ## Build/Test
 
@@ -38,3 +53,5 @@ unverified platform, etc, or they should come with proof updates to `l4v`.
 
 If you have larger changes or additions, it might be a good idea to get in
 contact with us as <devel@sel4.systems>, so we can help you get started.
+
+[1] https://docs.sel4.systems/Contributing

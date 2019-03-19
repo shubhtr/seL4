@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 #
-# Copyright 2014, NICTA
+# Copyright 2017, Data61
+# Commonwealth Scientific and Industrial Research Organisation (CSIRO)
+# ABN 41 687 119 230.
 #
 # This software may be distributed and modified according to the terms of
 # the BSD 2-Clause license. Note that NO WARRANTY is provided.
 # See "LICENSE_BSD2.txt" for details.
 #
-# @TAG(NICTA_BSD)
+# @TAG(DATA61_BSD)
 #
 
 import subprocess
@@ -17,7 +19,7 @@ output = []
 
 # Check arguments.
 if len(sys.argv) != 2:
-    print "Usage: gen_env.py <output file>"
+    print("Usage: gen_env.py <output file>")
     sys.exit(1)
 output_filename = sys.argv[1]
 
@@ -25,6 +27,11 @@ output_filename = sys.argv[1]
 p = subprocess.Popen(["git", "log", "-r", "HEAD", "-n", "1", "--pretty=format:%ci"],
         stdout=subprocess.PIPE)
 commit_date_string = p.communicate()[0]
+
+# in python3, this is a bytes, so convert it to a str
+if isinstance(commit_date_string, bytes):
+    commit_date_string = commit_date_string.decode("utf-8")
+
 commit_date = datetime.datetime.strptime(commit_date_string.split()[0], "%Y-%m-%d")
 
 # Output in a format that LaTeX can read.

@@ -10,21 +10,16 @@
 
 #include <arch/machine/hardware.h>
 
-/** MODIFIES: [*] */
-static inline void invalidateByWSL(word_t wsl)
-{
-    asm volatile("mcr p15, 0, %0, c7, c6, 2" : : "r"(wsl));
-}
-/** MODIFIES: [*] */
 static inline void cleanByWSL(word_t wsl)
 {
     asm volatile("mcr p15, 0, %0, c7, c10, 2" : : "r"(wsl));
 }
-/** MODIFIES: [*] */
+
 static inline void cleanInvalidateByWSL(word_t wsl)
 {
     asm volatile("mcr p15, 0, %0, c7, c14, 2" : : "r"(wsl));
 }
+
 
 static inline word_t readCLID(void)
 {
@@ -46,18 +41,19 @@ enum arm_cache_type {
     ARMCacheU =    4,
 };
 
+
 static inline word_t readCacheSize(int level, bool_t instruction)
 {
-    word_t size, csselr_old;
+    word_t size_unique_name, csselr_old;
     /* Save CSSELR */
     asm volatile("mrc p15, 2, %0, c0, c0, 0" : "=r"(csselr_old));
     /* Select cache level */
     asm volatile("mcr p15, 2, %0, c0, c0, 0" : : "r"((level << 1) | instruction));
     /* Read 'size' */
-    asm volatile("mrc p15, 1, %0, c0, c0, 0" : "=r"(size));
+    asm volatile("mrc p15, 1, %0, c0, c0, 0" : "=r"(size_unique_name));
     /* Restore CSSELR */
     asm volatile("mcr p15, 2, %0, c0, c0, 0" : : "r"(csselr_old));
-    return size;
+    return size_unique_name;
 }
 
 /* Number of bits to index within a cache line.  The field is log2(nwords) - 2
@@ -68,8 +64,8 @@ static inline word_t readCacheSize(int level, bool_t instruction)
 /* Number of sets, field is nsets - 1. */
 #define NSETS(s)    ((((s) >> 13) & MASK(15)) + 1)
 
-void
-clean_D_PoU(void)
+
+void clean_D_PoU(void)
 {
     int clid = readCLID();
     int lou = LOUU(clid);
@@ -80,24 +76,24 @@ clean_D_PoU(void)
             word_t s = readCacheSize(l, 0);
             int lbits = LINEBITS(s);
             int assoc = ASSOC(s);
-            int assoc_bits = wordBits - CLZ(assoc - 1);
+            int assoc_bits = wordBits - clzl(assoc - 1);
             int nsets = NSETS(s);
             int w;
 
             for (w = 0; w < assoc; w++) {
-                int s;
+                int v;
 
-                for (s = 0; s < nsets; s++) {
+                for (v = 0; v < nsets; v++) {
                     cleanByWSL((w << (32 - assoc_bits)) |
-                               (s << lbits) | (l << 1));
+                               (v << lbits) | (l << 1));
                 }
             }
         }
     }
 }
 
-void
-cleanInvalidate_D_PoC(void)
+
+void cleanInvalidate_D_PoC(void)
 {
     int clid = readCLID();
     int loc = LOC(clid);
@@ -108,16 +104,16 @@ cleanInvalidate_D_PoC(void)
             word_t s = readCacheSize(l, 0);
             int lbits = LINEBITS(s);
             int assoc = ASSOC(s);
-            int assoc_bits = wordBits - CLZ(assoc - 1);
+            int assoc_bits = wordBits - clzl(assoc - 1);
             int nsets = NSETS(s);
             int w;
 
             for (w = 0; w < assoc; w++) {
-                int s;
+                int v;
 
-                for (s = 0; s < nsets; s++) {
+                for (v = 0; v < nsets; v++) {
                     cleanInvalidateByWSL((w << (32 - assoc_bits)) |
-                                         (s << lbits) | (l << 1));
+                                         (v << lbits) | (l << 1));
                 }
             }
         }

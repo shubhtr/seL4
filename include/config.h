@@ -42,6 +42,11 @@
 #define CONFIG_RETYPE_FAN_OUT_LIMIT 256
 #endif
 
+/* chunk size for memory clears during retype, in bits. */
+#ifndef CONFIG_RESET_CHUNK_BITS
+#define CONFIG_RESET_CHUNK_BITS 8
+#endif
+
 /* maximum number of iterations until we preempt a delete/revoke invocation */
 #ifndef CONFIG_MAX_NUM_WORK_UNITS_PER_PREEMPTION
 #define CONFIG_MAX_NUM_WORK_UNITS_PER_PREEMPTION 100
@@ -50,12 +55,6 @@
 /* address range to flush per preemption work unit */
 #ifndef CONFIG_FLUSH_WORK_UNIT
 #define CONFIG_FLUSH_WORK_UNIT 64
-#endif
-
-/* maximum number of device regions in bootinfo */
-/* WARNING: must match value in libsel4! */
-#ifndef CONFIG_MAX_NUM_BOOTINFO_DEVICE_REGIONS
-#define CONFIG_MAX_NUM_BOOTINFO_DEVICE_REGIONS 199
 #endif
 
 /* maximum number of untyped caps in bootinfo */
@@ -70,17 +69,24 @@
 #define CONFIG_TIMER_TICK_MS 2
 #endif
 
-/* Configuration parameters below are for IA-32 only. */
-
-/* maximum number of nodes supported (if 1, a uniprocessor version is compiled) */
-#ifndef CONFIG_MAX_NUM_NODES
-#define CONFIG_MAX_NUM_NODES 8 /* must be between 1 and 256 */
+/* maximum number of different tracepoints which can be placed in the kernel */
+#ifndef CONFIG_MAX_NUM_TRACE_POINTS
+#define CONFIG_MAX_NUM_TRACE_POINTS 0
 #endif
 
-/* maximum number of PCI devices that can be marked as passthrough (IOMMU RMRR device scopes) */
+/* maximum number of IOMMU RMRR entries we can record while ACPI parsing */
+#ifndef CONFIG_MAX_RMRR_ENTRIES
+#define CONFIG_MAX_RMRR_ENTRIES 32
+#endif
 
-#ifndef CONFIG_MAX_NUM_PASSTHROUGH_DEVICES
-#define CONFIG_MAX_NUM_PASSTHROUGH_DEVICES 20
+/* maximum number of IOAPIC supported */
+#ifndef CONFIG_MAX_NUM_IOAPIC
+#define CONFIG_MAX_NUM_IOAPIC  1
+#endif
+
+/* Alias CONFIG_MAX_NUM_NODES > 1 to ENABLE_SMP_SUPPORT */
+#if CONFIG_MAX_NUM_NODES > 1
+#define ENABLE_SMP_SUPPORT
 #endif
 
 #endif /* __CONFIG_H */

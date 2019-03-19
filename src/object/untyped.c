@@ -22,16 +22,14 @@
 #include <kernel/thread.h>
 #include <util.h>
 
-static word_t
-alignUp(word_t baseValue, unsigned int alignment)
+static word_t alignUp(word_t baseValue, word_t alignment)
 {
     return (baseValue + (BIT(alignment) - 1)) & ~MASK(alignment);
 }
 
-exception_t
-decodeUntypedInvocation(word_t label, unsigned int length, cte_t *slot,
-                        cap_t cap, extra_caps_t extraCaps,
-                        bool_t call, word_t *buffer)
+exception_t decodeUntypedInvocation(word_t invLabel, word_t length, cte_t *slot,
+                                    cap_t cap, extra_caps_t excaps,
+                                    bool_t call, word_t *buffer)
 {
     word_t newType, userObjSize, nodeIndex;
     word_t nodeDepth, nodeOffset, nodeWindow;
@@ -40,20 +38,22 @@ decodeUntypedInvocation(word_t label, unsigned int length, cte_t *slot,
     cap_t nodeCap;
     lookupSlot_ret_t lu_ret;
     word_t nodeSize;
-    unsigned int i;
+    word_t i;
     slot_range_t slots;
     word_t freeRef, alignedFreeRef, objectSize, untypedFreeBytes;
     word_t freeIndex;
+    bool_t deviceMemory;
+    bool_t reset;
 
     /* Ensure operation is valid. */
-    if (label != UntypedRetype) {
+    if (invLabel != UntypedRetype) {
         userError("Untyped cap: Illegal operation attempted.");
         current_syscall_error.type = seL4_IllegalOperation;
         return EXCEPTION_SYSCALL_ERROR;
     }
 
     /* Ensure message length valid. */
-    if (length < 6 || extraCaps.excaprefs[0] == NULL) {
+    if (length < 6 || excaps.excaprefs[0] == NULL) {
         userError("Untyped invocation: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
@@ -67,7 +67,7 @@ decodeUntypedInvocation(word_t label, unsigned int length, cte_t *slot,
     nodeOffset  = getSyscallArg(4, buffer);
     nodeWindow  = getSyscallArg(5, buffer);
 
-    rootSlot = extraCaps.excaprefs[0];
+    rootSlot = excaps.excaprefs[0];
 
     /* Is the requested object type valid? */
     if (newType >= seL4_ObjectTypeCount) {
@@ -77,12 +77,16 @@ decodeUntypedInvocation(word_t label, unsigned int length, cte_t *slot,
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    /* Is the requested object size valid? */
-    if (userObjSize >= (wordBits - 1)) {
+    objectSize = getObjectSize(newType, userObjSize);
+
+    /* Exclude impossibly large object sizes. getObjectSize can overflow if userObjSize
+       is close to 2^wordBits, which is nonsensical in any case, so we check that this
+       did not happen. userObjSize will always need to be less than wordBits. */
+    if (userObjSize >= wordBits || objectSize > seL4_MaxUntypedBits) {
         userError("Untyped Retype: Invalid object size.");
         current_syscall_error.type = seL4_RangeError;
         current_syscall_error.rangeErrorMin = 0;
-        current_syscall_error.rangeErrorMax = wordBits - 2;
+        current_syscall_error.rangeErrorMax = seL4_MaxUntypedBits;
         return EXCEPTION_SYSCALL_ERROR;
     }
 
@@ -95,7 +99,7 @@ decodeUntypedInvocation(word_t label, unsigned int length, cte_t *slot,
     }
 
     /* If the target object is a Untyped, is it at least size 4? */
-    if (newType == seL4_UntypedObject && userObjSize < 4) {
+    if (newType == seL4_UntypedObject && userObjSize < seL4_MinUntypedBits) {
         userError("Untyped Retype: Requested UntypedItem size too small.");
         current_syscall_error.type = seL4_InvalidArgument;
         current_syscall_error.invalidArgumentNumber = 1;
@@ -104,9 +108,9 @@ decodeUntypedInvocation(word_t label, unsigned int length, cte_t *slot,
 
     /* Lookup the destination CNode (where our caps will be placed in). */
     if (nodeDepth == 0) {
-        nodeCap = extraCaps.excaprefs[0]->cap;
+        nodeCap = excaps.excaprefs[0]->cap;
     } else {
-        cap_t rootCap = extraCaps.excaprefs[0]->cap;
+        cap_t rootCap = excaps.excaprefs[0]->cap;
         lu_ret = lookupTargetSlot(rootCap, nodeIndex, nodeDepth);
         if (lu_ret.status != EXCEPTION_NONE) {
             userError("Untyped Retype: Invalid destination address.");
@@ -125,7 +129,7 @@ decodeUntypedInvocation(word_t label, unsigned int length, cte_t *slot,
     }
 
     /* Is the region where the user wants to put the caps valid? */
-    nodeSize = 1 << cap_cnode_cap_get_capCNodeRadix(nodeCap);
+    nodeSize = 1ul << cap_cnode_cap_get_capCNodeRadix(nodeCap);
     if (nodeOffset > nodeSize - 1) {
         userError("Untyped Retype: Destination node offset #%d too large.",
                   (int)nodeOffset);
@@ -177,8 +181,10 @@ decodeUntypedInvocation(word_t label, unsigned int length, cte_t *slot,
     status = ensureNoChildren(slot);
     if (status != EXCEPTION_NONE) {
         freeIndex = cap_untyped_cap_get_capFreeIndex(cap);
+        reset = false;
     } else {
         freeIndex = 0;
+        reset = true;
     }
     freeRef = GET_FREE_REF(cap_untyped_cap_get_capPtr(cap), freeIndex);
 
@@ -190,18 +196,26 @@ decodeUntypedInvocation(word_t label, unsigned int length, cte_t *slot,
      * fits, it will also fit aligned up (by packing it on the right hand side
      * of the untyped).
      */
-    objectSize = getObjectSize(newType, userObjSize);
     untypedFreeBytes = BIT(cap_untyped_cap_get_capBlockSize(cap)) -
                        FREE_INDEX_TO_OFFSET(freeIndex);
 
-    if (objectSize >= wordBits || (untypedFreeBytes >> objectSize) < nodeWindow) {
+    if ((untypedFreeBytes >> objectSize) < nodeWindow) {
         userError("Untyped Retype: Insufficient memory "
-                  "(%u * %u bytes needed, %u bytes available).",
-                  (unsigned int)nodeWindow,
-                  (objectSize >= wordBits ? -1 : (1 << objectSize)),
-                  (unsigned int)(untypedFreeBytes));
+                  "(%lu * %lu bytes needed, %lu bytes available).",
+                  (word_t)nodeWindow,
+                  (objectSize >= wordBits ? -1 : (1ul << objectSize)),
+                  (word_t)(untypedFreeBytes));
         current_syscall_error.type = seL4_NotEnoughMemory;
         current_syscall_error.memoryLeft = untypedFreeBytes;
+        return EXCEPTION_SYSCALL_ERROR;
+    }
+
+    deviceMemory = cap_untyped_cap_get_capIsDevice(cap);
+    if ((deviceMemory && !Arch_isFrameType(newType))
+        && newType != seL4_UntypedObject) {
+        userError("Untyped Retype: Creating kernel objects with device untyped");
+        current_syscall_error.type = seL4_InvalidArgument;
+        current_syscall_error.invalidArgumentNumber = 1;
         return EXCEPTION_SYSCALL_ERROR;
     }
 
@@ -210,48 +224,82 @@ decodeUntypedInvocation(word_t label, unsigned int length, cte_t *slot,
     alignedFreeRef = alignUp(freeRef, objectSize);
 
     /* Perform the retype. */
-    setThreadState(ksCurThread, ThreadState_Restart);
-    return invokeUntyped_Retype(
-               slot, WORD_PTR(cap_untyped_cap_get_capPtr(cap)),
-               (void*)alignedFreeRef, newType, userObjSize, slots, call);
+    setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
+    return invokeUntyped_Retype(slot, reset,
+                                (void *)alignedFreeRef, newType, userObjSize,
+                                slots, deviceMemory);
 }
 
-exception_t
-invokeUntyped_Retype(cte_t *srcSlot, void* regionBase,
-                     void* freeRegionBase,
-                     object_t newType, word_t userSize,
-                     slot_range_t destSlots, bool_t call)
+static exception_t resetUntypedCap(cte_t *srcSlot)
 {
-    word_t size_ign UNUSED;
+    cap_t prev_cap = srcSlot->cap;
+    word_t block_size = cap_untyped_cap_get_capBlockSize(prev_cap);
+    void *regionBase = WORD_PTR(cap_untyped_cap_get_capPtr(prev_cap));
+    int chunk = CONFIG_RESET_CHUNK_BITS;
+    word_t offset = FREE_INDEX_TO_OFFSET(cap_untyped_cap_get_capFreeIndex(prev_cap));
+    exception_t status;
+    bool_t deviceMemory = cap_untyped_cap_get_capIsDevice(prev_cap);
+
+    if (offset == 0) {
+        return EXCEPTION_NONE;
+    }
+
+    /** AUXUPD: "(True, typ_region_bytes (ptr_val \<acute>regionBase)
+        (unat \<acute>block_size))" */
+    /** GHOSTUPD: "(True, gs_clear_region (ptr_val \<acute>regionBase)
+        (unat \<acute>block_size))" */
+
+    if (deviceMemory || block_size < chunk) {
+        if (! deviceMemory) {
+            clearMemory(regionBase, block_size);
+        }
+        srcSlot->cap = cap_untyped_cap_set_capFreeIndex(prev_cap, 0);
+    } else {
+        for (offset = ROUND_DOWN(offset - 1, chunk);
+             offset != - BIT(chunk); offset -= BIT(chunk)) {
+            clearMemory(GET_OFFSET_FREE_PTR(regionBase, offset), chunk);
+            srcSlot->cap = cap_untyped_cap_set_capFreeIndex(prev_cap, OFFSET_TO_FREE_INDEX(offset));
+            status = preemptionPoint();
+            if (status != EXCEPTION_NONE) {
+                return status;
+            }
+        }
+    }
+    return EXCEPTION_NONE;
+}
+
+exception_t invokeUntyped_Retype(cte_t *srcSlot,
+                                 bool_t reset, void *retypeBase,
+                                 object_t newType, word_t userSize,
+                                 slot_range_t destSlots, bool_t deviceMemory)
+{
     word_t freeRef;
     word_t totalObjectSize;
+    void *regionBase = WORD_PTR(cap_untyped_cap_get_capPtr(srcSlot->cap));
+    exception_t status;
 
-    /*
-     * If this is the first object we are creating in this untyped region, we
-     * need to detype the old memory. At the concrete C level, this doesn't
-     * have any effect, but updating this shadow state is important for the
-     * verification process.
-     */
-    size_ign = cap_untyped_cap_ptr_get_capBlockSize(&(srcSlot->cap));
-    /** AUXUPD: "(True,
-        if (\<acute>freeRegionBase = \<acute>regionBase) then
-          (typ_region_bytes (ptr_val \<acute>regionBase) (unat \<acute>size_ign))
-        else
-          id)" */
-    /** GHOSTUPD: "(True,
-        if (\<acute>freeRegionBase = \<acute>regionBase) then
-          (gs_clear_region (ptr_val \<acute>regionBase) (unat \<acute>size_ign))
-        else
-          id)" */
+    freeRef = GET_FREE_REF(regionBase, cap_untyped_cap_get_capFreeIndex(srcSlot->cap));
 
-    /* Update the amount of free space left in this untyped cap. */
+    if (reset) {
+        status = resetUntypedCap(srcSlot);
+        if (status != EXCEPTION_NONE) {
+            return status;
+        }
+    }
+
+    /* Update the amount of free space left in this untyped cap.
+     *
+     * Note that userSize is not necessarily the true size of the object in
+     * memory. In the case where newType is seL4_CapTableObject, the size is
+     * transformed by getObjectSize. */
     totalObjectSize = destSlots.length << getObjectSize(newType, userSize);
-    freeRef = (word_t)freeRegionBase + totalObjectSize;
-    cap_untyped_cap_ptr_set_capFreeIndex(&(srcSlot->cap),
-                                         GET_FREE_INDEX(regionBase, freeRef));
+    freeRef = (word_t)retypeBase + totalObjectSize;
+    srcSlot->cap = cap_untyped_cap_set_capFreeIndex(srcSlot->cap,
+                                                    GET_FREE_INDEX(regionBase, freeRef));
 
     /* Create new objects and caps. */
-    createNewObjects(newType, srcSlot, destSlots, freeRegionBase, userSize);
+    createNewObjects(newType, srcSlot, destSlots, retypeBase, userSize,
+                     deviceMemory);
 
     return EXCEPTION_NONE;
 }

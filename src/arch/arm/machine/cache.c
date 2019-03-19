@@ -11,13 +11,13 @@
 #include <api/types.h>
 #include <arch/machine.h>
 #include <arch/machine/hardware.h>
+#include <arch/machine/l2c_310.h>
 
 #define LINE_START(a) ROUND_DOWN(a, L1_CACHE_LINE_SIZE_BITS)
 #define LINE_INDEX(a) (LINE_START(a)>>L1_CACHE_LINE_SIZE_BITS)
 #define L1_CACHE_LINE_SIZE BIT(L1_CACHE_LINE_SIZE_BITS)
 
-static void
-cleanCacheRange_PoC(vptr_t start, vptr_t end, paddr_t pstart)
+static void cleanCacheRange_PoC(vptr_t start, vptr_t end, paddr_t pstart)
 {
     vptr_t line;
     word_t index;
@@ -28,8 +28,7 @@ cleanCacheRange_PoC(vptr_t start, vptr_t end, paddr_t pstart)
     }
 }
 
-void
-cleanInvalidateCacheRange_RAM(vptr_t start, vptr_t end, paddr_t pstart)
+void cleanInvalidateCacheRange_RAM(vptr_t start, vptr_t end, paddr_t pstart)
 {
     vptr_t line;
     word_t index;
@@ -58,8 +57,7 @@ cleanInvalidateCacheRange_RAM(vptr_t start, vptr_t end, paddr_t pstart)
     dsb();
 }
 
-void
-cleanCacheRange_RAM(vptr_t start, vptr_t end, paddr_t pstart)
+void cleanCacheRange_RAM(vptr_t start, vptr_t end, paddr_t pstart)
 {
     /** GHOSTUPD: "((gs_get_assn cap_get_capSizeBits_'proc \<acute>ghost'state = 0
             \<or> \<acute>end - \<acute>start <= gs_get_assn cap_get_capSizeBits_'proc \<acute>ghost'state)
@@ -81,8 +79,7 @@ cleanCacheRange_RAM(vptr_t start, vptr_t end, paddr_t pstart)
     plat_cleanL2Range(pstart, pstart + (end - start));
 }
 
-void
-cleanCacheRange_PoU(vptr_t start, vptr_t end, paddr_t pstart)
+void cleanCacheRange_PoU(vptr_t start, vptr_t end, paddr_t pstart)
 {
     vptr_t line;
     word_t index;
@@ -98,8 +95,7 @@ cleanCacheRange_PoU(vptr_t start, vptr_t end, paddr_t pstart)
     }
 }
 
-void
-invalidateCacheRange_RAM(vptr_t start, vptr_t end, paddr_t pstart)
+void invalidateCacheRange_RAM(vptr_t start, vptr_t end, paddr_t pstart)
 {
     vptr_t line;
     word_t index;
@@ -141,8 +137,7 @@ invalidateCacheRange_RAM(vptr_t start, vptr_t end, paddr_t pstart)
     dsb();
 }
 
-void
-invalidateCacheRange_I(vptr_t start, vptr_t end, paddr_t pstart)
+void invalidateCacheRange_I(vptr_t start, vptr_t end, paddr_t pstart)
 {
     vptr_t line;
     word_t index;
@@ -153,8 +148,7 @@ invalidateCacheRange_I(vptr_t start, vptr_t end, paddr_t pstart)
     }
 }
 
-void
-branchFlushRange(vptr_t start, vptr_t end, paddr_t pstart)
+void branchFlushRange(vptr_t start, vptr_t end, paddr_t pstart)
 {
     vptr_t line;
     word_t index;
@@ -165,8 +159,7 @@ branchFlushRange(vptr_t start, vptr_t end, paddr_t pstart)
     }
 }
 
-void
-cleanCaches_PoU(void)
+void cleanCaches_PoU(void)
 {
     dsb();
     clean_D_PoU();
@@ -175,12 +168,19 @@ cleanCaches_PoU(void)
     dsb();
 }
 
-void
-cleanInvalidateL1Caches(void)
+void cleanInvalidateL1Caches(void)
 {
     dsb();
     cleanInvalidate_D_PoC();
     dsb();
     invalidate_I_PoU();
     dsb();
+}
+
+void arch_clean_invalidate_caches(void)
+{
+    cleanCaches_PoU();
+    plat_cleanInvalidateL2Cache();
+    cleanInvalidateL1Caches();
+    isb();
 }

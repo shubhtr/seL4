@@ -8,44 +8,28 @@
  * @TAG(GD_GPL)
  */
 
-#ifndef __PLAT_IO_H
-#define __PLAT_IO_H
+#ifndef __PLAT_MACHINE_IO_H_
+#define __PLAT_MACHINE_IO_H_
 
+#include <config.h>
+#include <linker.h>
 #include <types.h>
 
+/** MODIFIES: phantom_machine_state */
 void out8(uint16_t port, uint8_t value);
+/** MODIFIES: phantom_machine_state */
 void out16(uint16_t port, uint16_t value);
+/** MODIFIES: phantom_machine_state */
 void out32(uint16_t port, uint32_t value);
+/** MODIFIES: */
 uint8_t in8(uint16_t port);
+/** MODIFIES: */
 uint16_t in16(uint16_t port);
+/** MODIFIES: */
 uint32_t in32(uint16_t port);
 
-/* these versions are linked to physical addresses */
-static inline void SECTION(".phys.text")
-out8_phys(uint16_t port, uint8_t value)
-{
-    asm volatile("outb %[value], %[port]" :: [port] "d"(port), [value] "a"(value));
-}
-
-static inline uint8_t SECTION(".phys.text")
-in8_phys(uint16_t port)
-{
-    uint8_t value;
-    asm volatile("inb %[port], %[value]" : [value] "=a"(value) : [port] "d" (port));
-    return value;
-}
-
-#if defined DEBUG || defined RELEASE_PRINTF
-
+#if defined(CONFIG_DEBUG_BUILD) || defined(CONFIG_PRINTING)
 void serial_init(uint16_t port);
-void console_putchar(char c);
-
-#define kernel_putchar(c) console_putchar(c)
-
-#else /* !DEBUG */
-
-#define kernel_putchar(c) ((void)(0))
-
 #endif
 
-#endif
+#endif /* __PLAT_MACHINE_IO_H_ */

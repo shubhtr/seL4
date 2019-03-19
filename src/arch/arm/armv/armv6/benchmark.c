@@ -8,14 +8,37 @@
  * @TAG(GD_GPL)
  */
 
-#ifdef CONFIG_BENCHMARK
+#include <config.h>
 
-void
-armv_init_ccnt(void)
+#ifdef CONFIG_ENABLE_BENCHMARKS
+
+#include <arch/benchmark.h>
+
+#ifdef CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT
+uint64_t ccnt_num_overflows;
+#endif /* CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT */
+
+void armv_init_ccnt(void)
 {
+    uint32_t pmcr = 0;
 
-    /* TODO initialise cycle counter */
-#error "Not implemented"
+#ifdef CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT
+    /* Enable generating interrupts on overflows */
+    pmcr = BIT(6);
+    asm volatile(
+        "mcr p15, 0, %0, c15, c12, 0\n"
+        :
+        : "r"(pmcr)
+    );
+#endif /* CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT */
+
+    /* enable them */
+    pmcr |= BIT(2) | BIT(0);
+    asm volatile(
+        "mcr p15, 0, %0, c15, c12, 0\n"
+        : /* no outputs */
+        : "r"(pmcr)
+    );
 }
 
-#endif /* CONFIG_BENCHMARK */
+#endif /* CONFIG_ENABLE_BENCHMARKS */

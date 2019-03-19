@@ -1,19 +1,21 @@
 #!/usr/bin/env python
 
 #
-# Copyright 2014, NICTA
+# Copyright 2017, Data61
+# Commonwealth Scientific and Industrial Research Organisation (CSIRO)
+# ABN 41 687 119 230.
 #
 # This software may be distributed and modified according to the terms of
 # the BSD 2-Clause license. Note that NO WARRANTY is provided.
 # See "LICENSE_BSD2.txt" for details.
 #
-# @TAG(NICTA_BSD)
+# @TAG(DATA61_BSD)
 #
 
+from __future__ import print_function
 import sys
-import os.path
-import optparse
-import re
+import six
+from functools import reduce
 
 ## We assume length tp > 0
 def parse_type(tps):
@@ -30,11 +32,11 @@ def parse_type(tps):
 
         elif tp == 'Unit':
             return ('Unit',) , rest
-        
+
         elif tp == 'Array':
             tp2, rest = helper(rest)
             # arrays are Array ... sz
-            return ('Array', tp2, rest[0]), rest[1:]        
+            return ('Array', tp2, rest[0]), rest[1:]
 
         else:
             return ('Base', tp), rest
@@ -56,7 +58,7 @@ def handle_one_struct(s):
     def hdl_fld(f):
         fl, tp = f.split(':')
         return (fl.lstrip(), parse_type(tp.split(' ')))
-        
+
     name = s[0]
     return (name, map(hdl_fld, s[1:]))
 
@@ -64,7 +66,7 @@ def dict_from_list(ls):
     a = {}
     for k, v in ls:
         a[k] = v
-        
+
     return a
 
 def is_base(x):
@@ -93,7 +95,7 @@ def paths_to_type(mp, f, start):
     if f(start_tp):
         return [([], start_tp)]
     else:
-        res  = map(handle_one, mp[start])    
+        res  = map(handle_one, mp[start])
         return (reduce(lambda x, y: x + y, res))
 
 def build_types(file):
@@ -102,9 +104,9 @@ def build_types(file):
     lines = map(lambda x: x.rstrip(), in_file.readlines())
 
     in_file.close()
-    
+
     grps = splitBy(lambda x: x == '', lines)
-    
+
     # the order information will be important if we want _CL for all types
     sts = dict_from_list(map(handle_one_struct, grps))
 
@@ -114,14 +116,14 @@ def build_types(file):
 def print_graph(filename, out_file):
     mp = build_types(filename)
 
-    print >>out_file, 'digraph types {'
-    for k, flds in mp.iteritems():
+    print('digraph types {', file=out_file)
+    for k, flds in six.iteritems(mp):
         for fld, tp in flds:
             #if is_base(tp):
-            print >> out_file, '\t "%s" -> "%s" [label="%s"]' % \
-                               (k, base_name(tp), fld)
-    print >>out_file, '}'    
-    
+            print('\t "%s" -> "%s" [label="%s"]' % (k, base_name(tp), fld),
+                   file=out_file)
+    print('}', file=out_file)
+
 ## Toplevel
 
 if __name__ == '__main__':

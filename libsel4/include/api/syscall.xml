@@ -1,12 +1,14 @@
 <?xml version="1.0" ?>
 <!--
-     Copyright 2014, NICTA
+  Copyright 2017, Data61
+  Commonwealth Scientific and Industrial Research Organisation (CSIRO)
+  ABN 41 687 119 230.
 
-     This software may be distributed and modified according to the terms of
-     the BSD 2-Clause license. Note that NO WARRANTY is provided.
-     See "LICENSE_BSD2.txt" for details.
+  This software may be distributed and modified according to the terms of
+  the BSD 2-Clause license. Note that NO WARRANTY is provided.
+  See "LICENSE_BSD2.txt" for details.
 
-     @TAG(NICTA_BSD)
+     @TAG(DATA61_BSD)
   -->
 <!-- Please see syscalls.xsd to see the format of this file -->
 <syscalls>
@@ -14,30 +16,51 @@
     <api>
         <config>
             <syscall name="Call"      />
-            <syscall name="ReplyWait" />
+            <syscall name="ReplyRecv" />
             <syscall name="Send"      />
             <syscall name="NBSend"    />
-            <syscall name="Wait"      />
+            <syscall name="Recv"      />
             <syscall name="Reply"     />
             <syscall name="Yield"     />
+            <syscall name="NBRecv"      />
         </config>
     </api>
-    <!-- Syscalls on the unknown syscall path. These definitions will be wrapped in #ifdef name -->
+    <!-- Syscalls on the unknown syscall path. These definitions will be wrapped in #if condition -->
     <debug>
-        <config name="DEBUG">
+        <config condition="defined CONFIG_PRINTING">
             <syscall name="DebugPutChar"  />
+            <syscall name="DebugDumpScheduler" />
+        </config>
+        <config condition="defined CONFIG_DEBUG_BUILD">
             <syscall name="DebugHalt"     />
             <syscall name="DebugCapIdentify"   />
             <syscall name="DebugSnapshot" />
             <syscall name="DebugNameThread"/>
         </config>
-        <config name="DANGEROUS_CODE_INJECTION">
+        <config condition="defined CONFIG_DANGEROUS_CODE_INJECTION">
             <syscall name="DebugRun"/>
         </config>
-        <config name="CONFIG_BENCHMARK">
+        <config condition="defined CONFIG_ENABLE_BENCHMARKS">
+            <syscall name="BenchmarkFlushCaches" />
             <syscall name="BenchmarkResetLog" />
-            <syscall name="BenchmarkDumpLog"  />
-            <syscall name="BenchmarkLogSize"  />
+            <syscall name="BenchmarkFinalizeLog"  />
+            <syscall name="BenchmarkSetLogBuffer"  />
+            <syscall name="BenchmarkNullSyscall"  />
+        </config>
+        <config condition="defined CONFIG_BENCHMARK_TRACK_UTILISATION">
+            <syscall name="BenchmarkGetThreadUtilisation"  />
+            <syscall name="BenchmarkResetThreadUtilisation"  />
+        </config>
+        <config condition="defined CONFIG_KERNEL_X86_DANGEROUS_MSR">
+            <syscall name="X86DangerousWRMSR"/>
+            <syscall name="X86DangerousRDMSR"/>
+        </config>
+        <!-- This is not a debug syscall, but it needs to not appear in the 'API' syscall list
+             so that the check of 'is this a valid syscall' can remain a simple range check.
+             Therefore we'll put this here and the arch code will handle it before
+             passing to handleUnknownSyscall -->
+        <config condition="defined CONFIG_VTX">
+            <syscall name="VMEnter"/>
         </config>
     </debug>
 </syscalls>

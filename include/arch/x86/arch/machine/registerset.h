@@ -11,106 +11,86 @@
 #ifndef __ARCH_MACHINE_REGISTERSET_H
 #define __ARCH_MACHINE_REGISTERSET_H
 
+#include <config.h>
 #include <arch/types.h>
 #include <util.h>
 #include <assert.h>
 
-/* Number of bytes required to store FPU state. */
-#define FPU_STATE_SIZE 512
+#include <mode/machine/registerset.h>
 
 /* Minimum hardware-enforced alignment needed for FPU state. */
-#define MIN_FPU_ALIGNMENT 16
+#define MIN_FPU_ALIGNMENT 64
 
-/* These are the indices of the registers in the
- * saved thread context. The values are determined
- * by the order in which they're saved in the trap
- * handler.
- *
- * BEWARE:
- * You will have to adapt traps.S extensively if
- * you change anything in this enum!
- */
-enum _register {
-    /* general purpose registers */
+#ifdef CONFIG_HARDWARE_DEBUG_API
+/* X86 Debug register context */
+struct user_debug_state {
+    /* DR0-3 = Breakpoint linear address.
+     * DR4-5 = reserved or aliased, depending on value of CR4.DE.
+     * DR6 = Debug status register.
+     * DR7 = Debug control register.
+     */
+    word_t dr[6];
+    /* For each breakpoint currently being used by a thread, a bit in this
+     * bitfield is set, and for each breakpoint that is cleared, a bit is
+     * cleared. This enables an optimization: when a thread is being context-
+     * switched to, we can check to see if it's using breakpoints, and
+     * if so, we pop the whole register context.
+     *
+     * If it's not using breakpoints, we just pop all 0s into the ENABLED
+     * bits in DR7.
+     */
+    uint32_t used_breakpoints_bf;
 
-    /* 0x00 */  EAX             = 0,
-    /* 0x04 */  EBX             = 1,
-    capRegister     = 1,
-    badgeRegister   = 1,
-    /* 0x08 */  ECX             = 2,
-    /* 0x0C */  EDX             = 3,
-    /* 0x10 */  ESI             = 4,
-    msgInfoRegister = 4,
-    /* 0x14 */  EDI             = 5,
-    /* 0x18 */  EBP             = 6,
+    /* The API supports stepping N instructions forward, where N can 1..N.
+     * That feature is provided using this counter. Everytime a debug exception
+     * occurs, the kernel will decrement, then check the counter, and only when
+     * the counter is 0 will we deliver the fault to the userspace thread.
+     */
+    word_t n_instructions;
 
-    /* segment registers */
-
-    /* 0x1C */  DS = 7,
-    /* 0x20 */  ES = 8,
-    /* 0x24 */  FS = 9,
-    /* 0x28 */  GS = 10,
-
-    /* virtual registers (not actually present in hardware) */
-
-    /* 0x2C */  FaultEIP = 11,
-    /* 0x30 */  TLS_BASE = 12,
-
-    /* values pushed by the CPU directly */
-
-    /* 0x34 */  Error    = 13,
-    /* 0x38 */  NextEIP  = 14,
-    /* 0x3C */  CS       = 15,
-    /* 0x40 */  EFLAGS   = 16,
-    /* 0x44 */  ESP      = 17,
-    /* 0x48 */  SS       = 18,
-
-    /* 0x4C */  n_contextRegisters = 19
+    /* This is part of the state machine that allows a thread to make
+     * syscalls while being single-stepped. Basically helps the kernel to
+     * disable single-stepping while executing the syscall, and then re-enable
+     * it just before returning from the syscall into userspace.
+     */
+    bool_t single_step_enabled;
 };
+typedef struct user_debug_state user_breakpoint_state_t;
+#endif /* CONFIG_HARDWARE_DEBUG_API */
 
-typedef uint32_t register_t;
-
-enum messageSizes {
-    n_msgRegisters = 2,
-    n_frameRegisters = 10,
-    n_gpRegisters = 3,
-    n_exceptionMessage = 3,
-    n_syscallMessage = 10
-};
-
-extern const register_t msgRegisters[];
-extern const register_t frameRegisters[];
-extern const register_t gpRegisters[];
-extern const register_t exceptionMessage[];
-extern const register_t syscallMessage[];
-
-/* IA32 FPU context. */
+/* X86 FPU context. */
 struct user_fpu_state {
-    uint8_t state[FPU_STATE_SIZE];
+    uint8_t state[CONFIG_XSAVE_SIZE];
 };
 typedef struct user_fpu_state user_fpu_state_t;
 
-/* IA32 user-code context */
+/* X86 user-code context */
 struct user_context {
-    /* 76 bytes */
-    word_t registers[n_contextRegisters];
-
-    /*
-     * Padding to 16-byte boundary, required by the IA32 FPU state saving
-     * and restoring commands.
-     */
-    word_t padding;
-
-    /* 512 bytes. */
     user_fpu_state_t fpuState;
+    word_t registers[n_contextRegisters];
+#if defined(ENABLE_SMP_SUPPORT) && defined(CONFIG_ARCH_IA32)
+    /* stored pointer to kernel stack used when kernel run in current TCB context. */
+    word_t kernelSP;
+#endif
+#ifdef CONFIG_HARDWARE_DEBUG_API
+    user_breakpoint_state_t breakpointState;
+#endif
 };
 typedef struct user_context user_context_t;
 
-void Arch_initContext(user_context_t* context);
-word_t sanitiseRegister(register_t reg, word_t v);
+void Mode_initContext(user_context_t *context);
+void Arch_initContext(user_context_t *context);
+word_t Mode_sanitiseRegister(register_t reg, word_t v);
 
 /* Ensure FPU state is aligned within user context. */
-compile_assert(fpu_state_alignment_valid,
-               OFFSETOF(user_context_t, fpuState) % MIN_FPU_ALIGNMENT == 0)
+unverified_compile_assert(fpu_state_alignment_valid,
+                          OFFSETOF(user_context_t, fpuState) % MIN_FPU_ALIGNMENT == 0)
+
+#if defined(ENABLE_SMP_SUPPORT) && defined(CONFIG_ARCH_IA32)
+/* Ensure kernelSP is the first member following the registers. */
+unverified_compile_assert(kernelSP_alignment_valid,
+                          OFFSETOF(user_context_t, kernelSP) -
+                          OFFSETOF(user_context_t, registers) == 0x4C)
+#endif
 
 #endif

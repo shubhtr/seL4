@@ -11,32 +11,29 @@
 #ifndef __ASSERT_H
 #define __ASSERT_H
 
+#include <config.h>
 #include <util.h>
 
-#ifdef DEBUG
+#ifdef CONFIG_DEBUG_BUILD
 
 void _fail(
-    const char*  str,
-    const char*  file,
+    const char  *str,
+    const char  *file,
     unsigned int line,
-    const char*  function
+    const char  *function
 ) NORETURN;
 
 #define fail(s) _fail(s, __FILE__, __LINE__, __func__)
 
 void _assert_fail(
-    const char*  assertion,
-    const char*  file,
+    const char  *assertion,
+    const char  *file,
     unsigned int line,
-    const char*  function
+    const char  *function
 ) NORETURN;
 
 #define assert(expr) \
     if(!(expr)) _assert_fail(#expr, __FILE__, __LINE__, __FUNCTION__)
-
-/* Create an assert that will trigger a compile error if it fails. */
-#define compile_assert(name, expr) \
-        typedef int __assert_failed_##name[(expr) ? 1 : -1];
 
 #else /* !DEBUG */
 
@@ -44,8 +41,18 @@ void _assert_fail(
 
 #define assert(expr)
 
-#define compile_assert(name, expr)
-
 #endif /* DEBUG */
+
+/* Create an assert that will trigger a compile error if it fails. */
+#define compile_assert(name, expr) \
+        typedef int __assert_failed_##name[(expr) ? 1 : -1];
+
+/* Sometimes compile asserts contain expressions that the C parser cannot
+ * handle. For such expressions unverified_compile_assert should be used. */
+#ifdef CONFIG_VERIFICATION_BUILD
+#define unverified_compile_assert(name, expr)
+#else
+#define unverified_compile_assert compile_assert
+#endif
 
 #endif

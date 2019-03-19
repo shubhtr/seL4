@@ -16,169 +16,118 @@
 #include <arch/kernel/cmdline.h>
 #include <arch/kernel/boot.h>
 #include <arch/kernel/boot_sys.h>
+#include <arch/kernel/smp_sys.h>
 #include <arch/kernel/vspace.h>
 #include <arch/kernel/elf.h>
-#include <arch/linker.h>
+#include <smp/lock.h>
+#include <linker.h>
 #include <plat/machine/acpi.h>
 #include <plat/machine/devices.h>
-#include <plat/machine/pci.h>
 #include <plat/machine/pic.h>
 #include <plat/machine/ioapic.h>
+#include <arch/api/bootinfo_types.h>
 
 /* addresses defined in linker script */
 /* need a fake array to get the pointer from the linker script */
 
 /* start/end of CPU boot code */
-extern char _boot_cpu_start[1];
-extern char _boot_cpu_end[1];
+extern char boot_cpu_start[1];
+extern char boot_cpu_end[1];
 
 /* start/end of boot stack */
-extern char _boot_stack_bottom[1];
-extern char _boot_stack_top[1];
+extern char boot_stack_bottom[1];
+extern char boot_stack_top[1];
 
 /* locations in kernel image */
 extern char ki_boot_end[1];
 extern char ki_end[1];
+extern char ki_skim_start[1];
+extern char ki_skim_end[1];
 
-#ifdef DEBUG
-/* start/end of .ndks section */
-extern char _ndks_start[1];
-extern char _ndks_end[1];
-
-/* start/end of kernel stack */
-extern char _kernel_stack_bottom[1];
-extern char _kernel_stack_top[1];
-
+#ifdef CONFIG_PRINTING
 /* kernel entry point */
 extern char _start[1];
 #endif
 
 /* constants */
 
-#define BOOT_NODE_PADDR 0x80000
-#define NDKS_SIZE 0x3000
-compile_assert(align_ndks_size, IS_ALIGNED(NDKS_SIZE, PAGE_BITS))
-compile_assert(max_ndks_size, NDKS_SIZE <= PPTR_KDEV - PPTR_NDKS)
+#define HIGHMEM_PADDR 0x100000
 
 /* type definitions (directly corresponding to abstract specification) */
 
-typedef struct glks {
+typedef struct boot_state {
     p_region_t   avail_p_reg; /* region of available physical memory on platform */
     p_region_t   ki_p_reg;    /* region where the kernel image is in */
-    p_region_t   sh_p_reg;    /* region shared between nodes */
-    uint32_t     num_nodes;   /* number of nodes */
-    cpu_id_t     cpu_list       [CONFIG_MAX_NUM_NODES]; /* CPUs assigned to nodes */
-    ui_info_t    ui_info_list   [CONFIG_MAX_NUM_NODES]; /* info about userland images */
-    dev_p_regs_t dev_p_regs;  /* device memory regions */
-    uint32_t     apic_khz;    /* frequency of APIC/bus */
+    ui_info_t    ui_info;     /* info about userland images */
     uint32_t     num_ioapic;  /* number of IOAPICs detected */
     paddr_t      ioapic_paddr[CONFIG_MAX_NUM_IOAPIC];
-#ifdef CONFIG_IOMMU
     uint32_t     num_drhu; /* number of IOMMUs */
     paddr_t      drhu_list[MAX_NUM_DRHU]; /* list of physical addresses of the IOMMUs */
-    uint32_t     num_passthrough_dev;
-    dev_id_t     passthrough_dev_list[CONFIG_MAX_NUM_PASSTHROUGH_DEVICES];
-    uint32_t     pci_bus_used_bitmap[32]; /* 256 bit map of PCI buses in use */
-#endif
-} glks_t;
+    acpi_rmrr_list_t rmrr_list;
+    acpi_rsdp_t  acpi_rsdp; /* copy of the rsdp */
+    paddr_t      mods_end_paddr; /* physical address where boot modules end */
+    paddr_t      boot_module_start; /* physical address of first boot module */
+    uint32_t     num_cpus;    /* number of detected cpus */
+    uint32_t     mem_lower;   /* lower memory size for boot code of APs to run in real mode */
+    cpu_id_t     cpus[CONFIG_MAX_NUM_NODES];
+    mem_p_regs_t mem_p_regs;  /* physical memory regions */
+    seL4_X86_BootInfo_VBE vbe_info; /* Potential VBE information from multiboot */
+    seL4_X86_BootInfo_mmap_t mb_mmap_info; /* memory map information from multiboot */
+    seL4_X86_BootInfo_fb_t fb_info; /* framebuffer information as set by bootloader */
+} boot_state_t;
 
-typedef char ndks_t[NDKS_SIZE];
-
-/* global variables (called var_glks, var_ndks_list in abstract specification) */
-
-BOOT_DATA_GLOB
-glks_t glks;
-
-DATA_GLOB ALIGN(BIT(PAGE_BITS))
-ndks_t ndks_list[CONFIG_MAX_NUM_NODES];
-
-/* The kernel stack is actually allocated per-node as part of ndks_list, above.
- * The following definition, in conjunction with the linker script, tells the
- * linker to reserve space in virtual memory at the start of the NDKS section.
- */
-SECTION(".ndks.stack") ALIGN(BIT(PAGE_BITS)) VISIBLE
-char kernel_stack_alloc[4096];
+BOOT_BSS
+boot_state_t boot_state;
 
 /* global variables (not covered by abstract specification) */
 
-BOOT_DATA_GLOB
+BOOT_BSS
 cmdline_opt_t cmdline_opt;
-
-#ifdef CONFIG_PAE_PAGING
-DATA_GLOB ALIGN(BIT(PDPT_BITS))
-uint64_t kernel_pdpt_list[CONFIG_MAX_NUM_NODES][BIT(PDPT_BITS)];
-#define paging_structure_t uint64_t
-#else
-/* In non PAE paging we define the pdpt to be the pd. This is just to
- * allow for there to be common boot code for paging structures on
- * both platforms. This common code detects if it is passed a pdpt
- * and pd at the same address, and ignores the pdpt if this happens
- */
-#define kernel_pdpt_list kernel_pd_list
-#define paging_structure_t uint32_t
-#endif
-
-/* the array type is explicit instead of pde_t due to a c-parser limitation */
-DATA_GLOB ALIGN(BIT(PD_SIZE_BITS))
-paging_structure_t kernel_pd_list[CONFIG_MAX_NUM_NODES][BIT(PD_BITS + PDPT_BITS)];
-
-/* the array type is explicit instead of pte_t due to a c-parser limitation */
-DATA_GLOB ALIGN(BIT(PT_SIZE_BITS))
-paging_structure_t kernel_pt_list[CONFIG_MAX_NUM_NODES][BIT(PT_BITS)];
-
-#if defined DEBUG || defined RELEASE_PRINTF
-
-/* Determine whether we are in bootstrapping phase or runtime phase.
- * Is currently only needed to determine console port in debug mode.
- */
-bool_t
-in_boot_phase()
-{
-    paddr_t esp = pptr_to_paddr(get_current_esp());
-
-    return (esp <= BOOT_NODE_PADDR ||
-            (esp <= (paddr_t)_boot_stack_top && esp > (paddr_t)_boot_stack_bottom));
-}
-
-BOOT_CODE uint16_t
-console_port_of_node(node_id_t node_id)
-{
-    return cmdline_opt.console_port[node_id];
-}
-
-BOOT_CODE uint16_t
-debug_port_of_node(node_id_t node_id)
-{
-    return cmdline_opt.debug_port[node_id];
-}
-#endif
 
 /* functions not modeled in abstract specification */
 
-BOOT_CODE static paddr_t
-load_boot_module(node_id_t node, multiboot_module_t* boot_module, paddr_t load_paddr)
+BOOT_CODE static paddr_t find_load_paddr(paddr_t min_paddr, word_t image_size)
 {
-    Elf32_Header_t* elf_file = (Elf32_Header_t*)boot_module->start;
-    v_region_t v_reg;
+    int i;
 
-    if (!elf32_checkFile(elf_file)) {
-        printf("Boot module does not contain a valid ELF32 image\n");
+    for (i = 0; i < boot_state.mem_p_regs.count; i++) {
+        paddr_t start = MAX(min_paddr, boot_state.mem_p_regs.list[i].start);
+        paddr_t end = boot_state.mem_p_regs.list[i].end;
+        word_t region_size = end - start;
+
+        if (region_size >= image_size) {
+            return start;
+        }
+    }
+
+    return 0;
+}
+
+BOOT_CODE static paddr_t load_boot_module(word_t boot_module_start, paddr_t load_paddr)
+{
+    v_region_t v_reg;
+    word_t entry;
+    Elf_Header_t *elf_file = (Elf_Header_t *)boot_module_start;
+
+    if (!elf_checkFile(elf_file)) {
+        printf("Boot module does not contain a valid ELF image\n");
         return 0;
     }
 
-    v_reg = elf32_getMemoryBounds(elf_file);
+    v_reg = elf_getMemoryBounds(elf_file);
+    entry = elf_file->e_entry;
 
     if (v_reg.end == 0) {
-        printf("ELF32 image in boot module does not contain any segments\n");
+        printf("ELF image in boot module does not contain any segments\n");
         return 0;
     }
     v_reg.end = ROUND_UP(v_reg.end, PAGE_BITS);
 
-    printf("size=0x%x v_entry=0x%x v_start=0x%x v_end=0x%x ",
+    printf("size=0x%lx v_entry=%p v_start=%p v_end=%p ",
            v_reg.end - v_reg.start,
-           elf_file->e_entry,
-           v_reg.start,
-           v_reg.end
+           (void *)entry,
+           (void *)v_reg.start,
+           (void *)v_reg.end
           );
 
     if (!IS_ALIGNED(v_reg.start, PAGE_BITS)) {
@@ -190,486 +139,625 @@ load_boot_module(node_id_t node, multiboot_module_t* boot_module, paddr_t load_p
         printf("Userland image virtual end address too high\n");
         return 0;
     }
-    if ((elf_file->e_entry < v_reg.start) || (elf_file->e_entry >= v_reg.end)) {
+    if ((entry < v_reg.start) || (entry >= v_reg.end)) {
         printf("Userland image entry point does not lie within userland image\n");
         return 0;
     }
 
+    load_paddr = find_load_paddr(load_paddr, v_reg.end - v_reg.start);
+    assert(load_paddr);
+
     /* fill ui_info struct */
-    glks.ui_info_list[node].pv_offset = load_paddr - v_reg.start;
-    glks.ui_info_list[node].p_reg.start = load_paddr;
+    boot_state.ui_info.pv_offset = load_paddr - v_reg.start;
+    boot_state.ui_info.p_reg.start = load_paddr;
     load_paddr += v_reg.end - v_reg.start;
-    glks.ui_info_list[node].p_reg.end = load_paddr;
-    glks.ui_info_list[node].v_entry = elf_file->e_entry;
+    boot_state.ui_info.p_reg.end = load_paddr;
+    boot_state.ui_info.v_entry = entry;
 
-    printf("p_start=0x%x p_end=0x%x\n",
-           glks.ui_info_list[node].p_reg.start,
-           glks.ui_info_list[node].p_reg.end
+    printf("p_start=0x%lx p_end=0x%lx\n",
+           boot_state.ui_info.p_reg.start,
+           boot_state.ui_info.p_reg.end
           );
-
-    if (load_paddr > glks.avail_p_reg.end) {
-        printf("End of loaded userland image lies outside of usable physical memory\n");
-        return 0;
-    }
 
     /* initialise all initial userland memory and load potentially sparse ELF image */
     memzero(
-        (void*)glks.ui_info_list[node].p_reg.start,
-        glks.ui_info_list[node].p_reg.end - glks.ui_info_list[node].p_reg.start
+        (void *)boot_state.ui_info.p_reg.start,
+        boot_state.ui_info.p_reg.end - boot_state.ui_info.p_reg.start
     );
-    elf32_load(elf_file, glks.ui_info_list[node].pv_offset);
+    elf_load(elf_file, boot_state.ui_info.pv_offset);
 
     return load_paddr;
 }
 
-BOOT_CODE void
-insert_dev_p_reg(p_region_t reg)
-{
-    if (glks.dev_p_regs.count < CONFIG_MAX_NUM_BOOTINFO_DEVICE_REGIONS) {
-        glks.dev_p_regs.list[glks.dev_p_regs.count] = reg;
-        glks.dev_p_regs.count++;
-        printf("\n");
-    } else {
-        printf(" -> IGNORED! (too many)\n");
-    }
-}
-
-/* functions directly corresponding to abstract specification */
-
-BOOT_CODE cpu_id_t
-cur_cpu_id(void)
-{
-    cpu_id_t cpu_id;
-    paddr_t  esp = pptr_to_paddr(get_current_esp());
-
-    if (esp <= (paddr_t)_boot_stack_top && esp > (paddr_t)_boot_stack_bottom) {
-        cpu_id = glks.cpu_list[0];
-    } else {
-        cpu_id = esp >> 11;
-    }
-
-    return cpu_id;
-}
-
-BOOT_CODE node_id_t
-node_of_cpu(cpu_id_t cpu_id)
-{
-    node_id_t i;
-
-    for (i = 0; i < glks.num_nodes;  i++) {
-        if (glks.cpu_list[i] == cpu_id) {
-            return i;
-        }
-    }
-    /* Is it even possible for this to happen? */
-    fail("Couldn't find node of CPU");
-}
-
-
-BOOT_CODE static void
-discover_devices(void)
-{
-    /* We do not add any ia32 specific devices. Just add any platform ones */
-    platAddDevices();
-}
-
-/* split a region of physical memory into n mutually disjoint pieces */
-
-BOOT_CODE static p_region_t
-split_region(unsigned int i, unsigned int n, p_region_t reg)
-{
-    uint32_t offset;
-    uint32_t total_frames = (reg.end - reg.start) >> PAGE_BITS;
-    uint32_t frames_div = total_frames / n;
-    uint32_t frames_mod = total_frames % n;
-
-    if (i < frames_mod) {
-        offset = (i * (frames_div + 1)) << PAGE_BITS;
-        return (p_region_t) {
-            .start = reg.start + offset,
-             .end   = reg.start + offset + ((frames_div + 1) << PAGE_BITS)
-        };
-    } else {
-        offset = (frames_mod * (frames_div + 1) + (i - frames_mod) * frames_div) << PAGE_BITS;
-        return (p_region_t) {
-            .start = reg.start + offset,
-             .end   = reg.start + offset + (frames_div << PAGE_BITS)
-        };
-    }
-}
-
-BOOT_CODE static bool_t
-lift_ndks(node_id_t node_id)
-{
-    p_region_t ndks_p_reg;
-
-    ndks_p_reg.start = pptr_to_paddr(ndks_list[node_id]);
-    ndks_p_reg.end = ndks_p_reg.start + NDKS_SIZE;
-
-    if (!map_kernel_window(
-                (pdpte_t*)kernel_pdpt_list[node_id],
-                (pde_t*)kernel_pd_list[node_id],
-                (pte_t*)kernel_pt_list[node_id],
-                ndks_p_reg
-#ifdef CONFIG_IRQ_IOAPIC
-                , glks.num_ioapic,
-                glks.ioapic_paddr
-#endif
-#ifdef CONFIG_IOMMU
-                , node_id == 0 ? glks.num_drhu : 0,
-                glks.drhu_list
-#endif
-            )) {
-        return false;
-    }
-    write_cr3(pptr_to_paddr(kernel_pdpt_list[node_id]));
-    /* Sync up the compilers view of the world here to force the PD to actually
-     * be set *right now* instead of delayed */
-    asm volatile("" ::: "memory");
-    return true;
-}
-
-static BOOT_CODE bool_t
-try_boot_node(void)
+static BOOT_CODE bool_t try_boot_sys_node(cpu_id_t cpu_id)
 {
     p_region_t boot_mem_reuse_p_reg;
 
-    cpu_id_t   cpu_id  = cur_cpu_id();
-    node_id_t  node_id = node_of_cpu(cpu_id);
-
-    uint32_t      num_nodes  = glks.num_nodes;
-    ui_info_t     ui_info    = glks.ui_info_list[node_id];
-    dev_p_regs_t* dev_p_regs = &glks.dev_p_regs;
-
-    /* calculate this node's available physical memory */
-    p_region_t this_avail_p_reg = split_region(node_id, num_nodes, glks.avail_p_reg);
-
-    /* if we only boot up one node, we can reuse boot code/data memory */
-    if (num_nodes == 1) {
-        boot_mem_reuse_p_reg.start = PADDR_LOAD;
-        boot_mem_reuse_p_reg.end = (paddr_t)ki_boot_end - BASE_OFFSET;
-    } else {
-        boot_mem_reuse_p_reg = P_REG_EMPTY;
+    if (!map_kernel_window(
+            boot_state.num_ioapic,
+            boot_state.ioapic_paddr,
+            boot_state.num_drhu,
+            boot_state.drhu_list
+        )) {
+        return false;
     }
+    setCurrentVSpaceRoot(kpptr_to_paddr(X86_KERNEL_VSPACE_ROOT), 0);
+    /* Sync up the compilers view of the world here to force the PD to actually
+     * be set *right now* instead of delayed */
+    asm volatile("" ::: "memory");
 
-    /* map NDKS (node kernel state) into PD/PT and activate PD */
-    if (!lift_ndks(node_id)) {
+#ifdef CONFIG_KERNEL_SKIM_WINDOW
+    if (!map_skim_window((vptr_t)ki_skim_start, (vptr_t)ki_skim_end)) {
+        return false;
+    }
+#endif
+
+    /* reuse boot code/data memory */
+    boot_mem_reuse_p_reg.start = PADDR_LOAD;
+    boot_mem_reuse_p_reg.end = (paddr_t)ki_boot_end - KERNEL_BASE_OFFSET;
+
+    /* initialise the CPU */
+    if (!init_cpu(config_set(CONFIG_IRQ_IOAPIC) ? 1 : 0)) {
         return false;
     }
 
     /* initialise NDKS and kernel heap */
-    if (!init_node_state(
-                this_avail_p_reg,
-                glks.sh_p_reg,
-                dev_p_regs,
-                ui_info,
-                boot_mem_reuse_p_reg,
-                node_id,
-                num_nodes,
-                /* parameters below not modeled in abstract specification */
-                (pdpte_t*)kernel_pdpt_list[node_id],
-                (pde_t*)kernel_pd_list[node_id],
-                (pte_t*)kernel_pt_list[node_id]
-#ifdef CONFIG_IOMMU
-                , cpu_id,
-                node_id == 0 ? glks.num_drhu : 0,
-                glks.drhu_list,
-                glks.num_passthrough_dev,
-                glks.passthrough_dev_list,
-                glks.pci_bus_used_bitmap
-#endif
-            )) {
+    if (!init_sys_state(
+            cpu_id,
+            boot_state.mem_p_regs,
+            boot_state.ui_info,
+            boot_mem_reuse_p_reg,
+            /* parameters below not modeled in abstract specification */
+            boot_state.num_drhu,
+            boot_state.drhu_list,
+            &boot_state.rmrr_list,
+            &boot_state.acpi_rsdp,
+            &boot_state.vbe_info,
+            &boot_state.mb_mmap_info,
+            &boot_state.fb_info
+        )) {
         return false;
     }
 
-    /* initialise the CPU */
-    if (!init_node_cpu(
-                glks.apic_khz,
-#ifdef CONFIG_IRQ_IOAPIC
-                1
-#else
-                node_id != 0
-#endif
-            )) {
+    return true;
+}
+
+static BOOT_CODE bool_t add_mem_p_regs(p_region_t reg)
+{
+    if (reg.end > PADDR_TOP) {
+        reg.end = PADDR_TOP;
+    }
+    if (reg.start > PADDR_TOP) {
+        reg.start = PADDR_TOP;
+    }
+    if (reg.start == reg.end) {
+        /* Return true here as it's not an error for there to exist memory outside the kernel window,
+         * we're just going to ignore it and leave it to be given out as device memory */
+        return true;
+    }
+    if (boot_state.mem_p_regs.count == MAX_NUM_FREEMEM_REG) {
+        printf("Dropping memory region 0x%lx-0x%lx, try increasing MAX_NUM_FREEMEM_REG\n", reg.start, reg.end);
         return false;
+    }
+    printf("Adding physical memory region 0x%lx-0x%lx\n", reg.start, reg.end);
+    boot_state.mem_p_regs.list[boot_state.mem_p_regs.count] = reg;
+    boot_state.mem_p_regs.count++;
+    return add_allocated_p_region(reg);
+}
+
+/*
+ * the code relies that the GRUB provides correct information
+ * about the actual physical memory regions.
+ */
+static BOOT_CODE bool_t parse_mem_map(uint32_t mmap_length, uint32_t mmap_addr)
+{
+    multiboot_mmap_t *mmap = (multiboot_mmap_t *)((word_t)mmap_addr);
+    printf("Parsing GRUB physical memory map\n");
+
+    while ((word_t)mmap < (word_t)(mmap_addr + mmap_length)) {
+        uint64_t mem_start = mmap->base_addr;
+        uint64_t mem_length = mmap->length;
+        uint32_t type = mmap->type;
+        if (mem_start != (uint64_t)(word_t)mem_start) {
+            printf("\tPhysical memory region not addressable\n");
+        } else {
+            printf("\tPhysical Memory Region from %lx size %lx type %d\n", (long)mem_start, (long)mem_length, type);
+            if (type == MULTIBOOT_MMAP_USEABLE_TYPE && mem_start >= HIGHMEM_PADDR) {
+                if (!add_mem_p_regs((p_region_t) {
+                mem_start, mem_start + mem_length
+            })) {
+                    return false;
+                }
+            }
+        }
+        mmap++;
     }
     return true;
 }
 
-/* This is the entry function for SMP nodes. Node 0 calls
- * try_boot_node directly */
-BOOT_CODE VISIBLE void
-boot_node(void)
+static BOOT_CODE bool_t is_compiled_for_microarchitecture(void)
 {
-    bool_t result;
-    result = try_boot_node();
-    if (!result) {
-        fail("Failed to start node :(\n");
+    word_t microarch_generation = 0;
+    x86_cpu_identity_t *model_info = x86_cpuid_get_model_info();
+
+    if (config_set(CONFIG_ARCH_X86_SKYLAKE)) {
+        microarch_generation = 7;
+    } else if (config_set(CONFIG_ARCH_X86_BROADWELL)) {
+        microarch_generation = 6;
+    } else if (config_set(CONFIG_ARCH_X86_HASWELL)) {
+        microarch_generation = 5;
+    } else if (config_set(CONFIG_ARCH_X86_IVY)) {
+        microarch_generation = 4;
+    } else if (config_set(CONFIG_ARCH_X86_SANDY)) {
+        microarch_generation = 3;
+    } else if (config_set(CONFIG_ARCH_X86_WESTMERE)) {
+        microarch_generation = 2;
+    } else if (config_set(CONFIG_ARCH_X86_NEHALEM)) {
+        microarch_generation = 1;
     }
+
+    switch (model_info->model) {
+    case SKYLAKE_1_MODEL_ID:
+    case SKYLAKE_2_MODEL_ID:
+        if (microarch_generation > 7) {
+            return false;
+        }
+        break;
+
+    case BROADWELL_1_MODEL_ID:
+    case BROADWELL_2_MODEL_ID:
+    case BROADWELL_3_MODEL_ID:
+    case BROADWELL_4_MODEL_ID:
+    case BROADWELL_5_MODEL_ID:
+        if (microarch_generation > 6) {
+            return false;
+        }
+        break;
+
+    case HASWELL_1_MODEL_ID:
+    case HASWELL_2_MODEL_ID:
+    case HASWELL_3_MODEL_ID:
+    case HASWELL_4_MODEL_ID:
+        if (microarch_generation > 5) {
+            return false;
+        }
+        break;
+
+    case IVY_BRIDGE_1_MODEL_ID:
+    case IVY_BRIDGE_2_MODEL_ID:
+    case IVY_BRIDGE_3_MODEL_ID:
+        if (microarch_generation > 4) {
+            return false;
+        }
+        break;
+
+    case SANDY_BRIDGE_1_MODEL_ID:
+    case SANDY_BRIDGE_2_MODEL_ID:
+        if (microarch_generation > 3) {
+            return false;
+        }
+        break;
+
+    case WESTMERE_1_MODEL_ID:
+    case WESTMERE_2_MODEL_ID:
+    case WESTMERE_3_MODEL_ID:
+        if (microarch_generation > 2) {
+            return false;
+        }
+        break;
+
+    case NEHALEM_1_MODEL_ID:
+    case NEHALEM_2_MODEL_ID:
+    case NEHALEM_3_MODEL_ID:
+        if (microarch_generation > 1) {
+            return false;
+        }
+        break;
+
+    default:
+        if (!config_set(CONFIG_ARCH_X86_GENERIC)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
-BOOT_CODE static void
-start_cpu(cpu_id_t cpu_id, paddr_t boot_fun_paddr)
+static BOOT_CODE bool_t try_boot_sys(void)
 {
-    /* memory fence needed before starting the other CPU */
-    ia32_mfence();
-
-    /* starting the other CPU */
-    apic_send_init_ipi(cpu_id);
-    apic_send_startup_ipi(cpu_id, boot_fun_paddr);
-}
-
-static BOOT_CODE bool_t
-try_boot_sys(
-    unsigned long multiboot_magic,
-    multiboot_info_t* mbi,
-    uint32_t apic_khz
-)
-{
-    /* ==== following code corresponds to the "select" in abstract specification ==== */
-
-    acpi_rsdt_t* acpi_rsdt; /* physical address of ACPI root */
-    paddr_t mods_end_paddr; /* physical address where boot modules end */
-    paddr_t load_paddr;
-    unsigned int i;
+    paddr_t mods_end_paddr = boot_state.mods_end_paddr;
     p_region_t ui_p_regs;
-    multiboot_module_t *modules = (multiboot_module_t*)mbi->mod_list;
+    paddr_t load_paddr;
 
-    glks.num_nodes = 1; /* needed to enable console output */
+    boot_state.ki_p_reg.start = PADDR_LOAD;
+    boot_state.ki_p_reg.end = kpptr_to_paddr(ki_end);
 
-    if (multiboot_magic != MULTIBOOT_MAGIC) {
-        printf("Boot loader not multiboot compliant\n");
+    if (!x86_cpuid_initialize()) {
+        printf("Warning: Your x86 CPU has an unsupported vendor, '%s'.\n"
+               "\tYour setup may not be able to competently run seL4 as "
+               "intended.\n"
+               "\tCurrently supported x86 vendors are AMD and Intel.\n",
+               x86_cpuid_get_identity()->vendor_string);
+    }
+
+    if (!is_compiled_for_microarchitecture()) {
+        printf("Warning: Your kernel was not compiled for the current microarchitecture.\n");
+    }
+
+    cpuid_007h_edx_t edx;
+    edx.words[0] = x86_cpuid_edx(0x7, 0);
+    /* see if we can definitively say whether or not we need the skim window by
+     * checking whether the CPU is vulnerable to rogue data cache loads (rdcl) */
+    if (cpuid_007h_edx_get_ia32_arch_cap_msr(edx)) {
+        ia32_arch_capabilities_msr_t cap_msr;
+        cap_msr.words[0] = x86_rdmsr(IA32_ARCH_CAPABILITIES_MSR);
+        if (ia32_arch_capabilities_msr_get_rdcl_no(cap_msr) && config_set(CONFIG_KERNEL_SKIM_WINDOW)) {
+            printf("CPU reports not vulnerable to Rogue Data Cache Load (aka Meltdown https://meltdownattack.com) "
+                   "yet SKIM window is enabled. Performance is needlessly being impacted, consider disabling.\n");
+        } else if (!ia32_arch_capabilities_msr_get_rdcl_no(cap_msr) && !config_set(CONFIG_KERNEL_SKIM_WINDOW)) {
+            printf("CPU reports vulnerable to Rogue Data Cache Load (aka Meltdown https://meltdownattack.com) "
+                   "yet SKIM window is *not* enabled. Please re-build with SKIM window enabled.");
+            return false;
+        }
+    } else {
+        /* hardware doesn't tell us directly so guess based on CPU vendor */
+        if (config_set(CONFIG_KERNEL_SKIM_WINDOW) && x86_cpuid_get_identity()->vendor == X86_VENDOR_AMD) {
+            printf("SKIM window for mitigating Meltdown (https://www.meltdownattack.com) "
+                   "not necessary for AMD and performance is being needlessly affected, "
+                   "consider disabling\n");
+        }
+        if (!config_set(CONFIG_KERNEL_SKIM_WINDOW) && x86_cpuid_get_identity()->vendor == X86_VENDOR_INTEL) {
+            printf("***WARNING*** SKIM window not enabled, this machine is probably vulnerable "
+                   "to Meltdown (https://www.meltdownattack.com), consider enabling\n");
+        }
+    }
+
+#ifdef ENABLE_SMP_SUPPORT
+    /* copy boot code for APs to lower memory to run in real mode */
+    if (!copy_boot_code_aps(boot_state.mem_lower)) {
         return false;
     }
-    cmdline_parse((const char *)mbi->cmdline, &cmdline_opt);
+    /* Initialize any kernel TLS */
+    mode_init_tls(0);
+#endif /* ENABLE_SMP_SUPPORT */
 
-    /* assert correct NDKS location and size */
-    assert((uint32_t)_ndks_start == PPTR_NDKS);
-    assert(_ndks_end - _ndks_start <= NDKS_SIZE);
-
-    if ((mbi->flags & MULTIBOOT_INFO_MEM_FLAG) == 0) {
-        printf("Boot loader did not provide information about physical memory size\n");
-        return false;
-    }
-
-    assert(_boot_cpu_end - _boot_cpu_start < 0x400);
-    if ((mbi->mem_lower << 10) < BOOT_NODE_PADDR + 0x400) {
-        printf("Need at least 513K of available lower physical memory\n");
-        return false;
-    }
-
-    /* copy CPU bootup code to lower memory */
-    memcpy((void*)BOOT_NODE_PADDR, _boot_cpu_start, _boot_cpu_end - _boot_cpu_start);
-
-    /* calculate available physical memory (above 1M) */
-    glks.avail_p_reg.start = 0x100000;
-    glks.avail_p_reg.end = ROUND_DOWN(glks.avail_p_reg.start + (mbi->mem_upper << 10), PAGE_BITS);
-
-    /* check maximum seL4 can use */
-    if (glks.avail_p_reg.end > PADDR_TOP) {
-        glks.avail_p_reg.end = PADDR_TOP;
-    }
-
-    printf("Physical memory usable by seL4: start=0x%x end=0x%x size=0x%x\n",
-           glks.avail_p_reg.start,
-           glks.avail_p_reg.end,
-           glks.avail_p_reg.end - glks.avail_p_reg.start
-          );
-
-    glks.ki_p_reg.start = PADDR_LOAD;
-    glks.ki_p_reg.end = pptr_to_paddr(ki_end);
-
-    printf("Kernel loaded to: start=0x%x end=0x%x size=0x%x entry=0x%x\n",
-           glks.ki_p_reg.start,
-           glks.ki_p_reg.end,
-           glks.ki_p_reg.end - glks.ki_p_reg.start,
+    printf("Kernel loaded to: start=0x%lx end=0x%lx size=0x%lx entry=0x%lx\n",
+           boot_state.ki_p_reg.start,
+           boot_state.ki_p_reg.end,
+           boot_state.ki_p_reg.end - boot_state.ki_p_reg.start,
            (paddr_t)_start
           );
-    printf("Kernel stack size: 0x%x\n", _kernel_stack_top - _kernel_stack_bottom);
-
-    glks.apic_khz = apic_khz;
-    printf("APIC: Bus frequency is %d MHz\n", glks.apic_khz / 1000);
 
     /* remapping legacy IRQs to their correct vectors */
     pic_remap_irqs(IRQ_INT_OFFSET);
-#ifdef CONFIG_IRQ_IOAPIC
-    /* Disable the PIC so that it does not generate any interrupts. We need to
-     * do this *before* we initialize the apic */
-    pic_disable();
-#endif
+    if (config_set(CONFIG_IRQ_IOAPIC)) {
+        /* Disable the PIC so that it does not generate any interrupts. We need to
+         * do this *before* we initialize the apic */
+        pic_disable();
+    }
 
-    /* Prepare for accepting device regions from here on */
-    glks.dev_p_regs.count = 0;
-
-    /* get ACPI root table */
-    acpi_rsdt = acpi_init();
-    if (!acpi_rsdt) {
+    /* validate the ACPI table */
+    if (!acpi_validate_rsdp(&boot_state.acpi_rsdp)) {
         return false;
     }
 
-#ifdef CONFIG_IOMMU
-    if (cmdline_opt.disable_iommu) {
-        glks.num_drhu = 0;
+    /* check if kernel configuration matches platform requirments */
+    if (!acpi_fadt_scan(&boot_state.acpi_rsdp)) {
+        return false;
+    }
+
+    if (!config_set(CONFIG_IOMMU) || cmdline_opt.disable_iommu) {
+        boot_state.num_drhu = 0;
     } else {
         /* query available IOMMUs from ACPI */
         acpi_dmar_scan(
-            acpi_rsdt,
-            glks.drhu_list,
-            &glks.num_drhu,
+            &boot_state.acpi_rsdp,
+            boot_state.drhu_list,
+            &boot_state.num_drhu,
             MAX_NUM_DRHU,
-            glks.passthrough_dev_list,
-            &glks.num_passthrough_dev,
-            CONFIG_MAX_NUM_PASSTHROUGH_DEVICES
+            &boot_state.rmrr_list
         );
     }
-#endif
 
     /* query available CPUs from ACPI */
-    glks.num_nodes = acpi_madt_scan(acpi_rsdt, glks.cpu_list, CONFIG_MAX_NUM_NODES, &glks.num_ioapic, glks.ioapic_paddr);
-    if (glks.num_nodes == 0) {
+    boot_state.num_cpus = acpi_madt_scan(&boot_state.acpi_rsdp, boot_state.cpus, &boot_state.num_ioapic,
+                                         boot_state.ioapic_paddr);
+    if (boot_state.num_cpus == 0) {
         printf("No CPUs detected\n");
         return false;
     }
-#ifdef CONFIG_IRQ_IOAPIC
-    if (glks.num_ioapic == 0) {
-        printf("No IOAPICs detected\n");
-        return false;
-    }
-#else
-    if (glks.num_ioapic > 0) {
-        printf("Detected %d IOAPICs, but configured to use PIC instead\n", glks.num_ioapic);
-    }
-#endif
 
-    if (glks.num_nodes > cmdline_opt.max_num_nodes) {
-        glks.num_nodes = cmdline_opt.max_num_nodes;
-    }
-    printf("Will boot up %d seL4 node(s)\n", glks.num_nodes);
-
-    if (!(mbi->flags & MULTIBOOT_INFO_MODS_FLAG)) {
-        printf("Boot loader did not provide information about boot modules\n");
-        return false;
-    }
-
-    printf("Detected %d boot module(s):\n", mbi->mod_count);
-    mods_end_paddr = 0;
-
-    for (i = 0; i < mbi->mod_count; i++) {
-        printf(
-            "  module #%d: start=0x%x end=0x%x size=0x%x name='%s'\n",
-            i,
-            modules[i].start,
-            modules[i].end,
-            modules[i].end - modules[i].start,
-            modules[i].name
-        );
-        if ((int32_t)(modules[i].end - modules[i].start) <= 0) {
-            printf("Invalid boot module size! Possible cause: boot module file not found by QEMU\n");
+    if (config_set(CONFIG_IRQ_IOAPIC)) {
+        if (boot_state.num_ioapic == 0) {
+            printf("No IOAPICs detected\n");
             return false;
         }
-        if (mods_end_paddr < modules[i].end) {
-            mods_end_paddr = modules[i].end;
+    } else {
+        if (boot_state.num_ioapic > 0) {
+            printf("Detected %d IOAPICs, but configured to use PIC instead\n", boot_state.num_ioapic);
         }
     }
-    mods_end_paddr = ROUND_UP(mods_end_paddr, PAGE_BITS);
-    assert(mods_end_paddr > glks.ki_p_reg.end);
 
-    if (mbi->mod_count < 1) {
-        printf("Expect at least one boot module (containing a userland image)\n");
-        return false;
-    }
+    mods_end_paddr = ROUND_UP(mods_end_paddr, PAGE_BITS);
+    assert(mods_end_paddr > boot_state.ki_p_reg.end);
 
     printf("ELF-loading userland images from boot modules:\n");
     load_paddr = mods_end_paddr;
 
-    for (i = 0; i < mbi->mod_count && i < glks.num_nodes; i++) {
-        printf("  module #%d for node #%d: ", i, i);
-        load_paddr = load_boot_module(i, modules + i, load_paddr);
-        if (!load_paddr) {
-            return false;
-        }
-    }
-
-    for (i = mbi->mod_count; i < glks.num_nodes; i++) {
-        printf("  module #%d for node #%d: ", mbi->mod_count - 1, i);
-        load_paddr = load_boot_module(i, modules + mbi->mod_count - 1, load_paddr);
-        if (!load_paddr) {
-            return false;
-        }
+    load_paddr = load_boot_module(boot_state.boot_module_start, load_paddr);
+    if (!load_paddr) {
+        return false;
     }
 
     /* calculate final location of userland images */
-    ui_p_regs.start = glks.ki_p_reg.end;
+    ui_p_regs.start = boot_state.ki_p_reg.end;
     ui_p_regs.end = ui_p_regs.start + load_paddr - mods_end_paddr;
 
     printf(
-        "Moving loaded userland images to final location: from=0x%x to=0x%x size=0x%x\n",
+        "Moving loaded userland images to final location: from=0x%lx to=0x%lx size=0x%lx\n",
         mods_end_paddr,
         ui_p_regs.start,
         ui_p_regs.end - ui_p_regs.start
     );
-    memcpy((void*)ui_p_regs.start, (void*)mods_end_paddr, ui_p_regs.end - ui_p_regs.start);
+    memcpy((void *)ui_p_regs.start, (void *)mods_end_paddr, ui_p_regs.end - ui_p_regs.start);
 
-    for (i = 0; i < glks.num_nodes; i++) {
-        /* adjust p_reg and pv_offset to final load address */
-        glks.ui_info_list[i].p_reg.start -= mods_end_paddr - ui_p_regs.start;
-        glks.ui_info_list[i].p_reg.end   -= mods_end_paddr - ui_p_regs.start;
-        glks.ui_info_list[i].pv_offset   -= mods_end_paddr - ui_p_regs.start;
-    }
+    /* adjust p_reg and pv_offset to final load address */
+    boot_state.ui_info.p_reg.start -= mods_end_paddr - ui_p_regs.start;
+    boot_state.ui_info.p_reg.end   -= mods_end_paddr - ui_p_regs.start;
+    boot_state.ui_info.pv_offset   -= mods_end_paddr - ui_p_regs.start;
 
     /* ==== following code corresponds to abstract specification after "select" ==== */
 
-    /* exclude kernel image from available memory */
-    assert(glks.avail_p_reg.start == glks.ki_p_reg.start);
-    glks.avail_p_reg.start = glks.ki_p_reg.end;
-
-    /* exclude userland images from available memory */
-    assert(glks.avail_p_reg.start == ui_p_regs.start);
-    glks.avail_p_reg.start = ui_p_regs.end;
-
-    /* choose shared region */
-    glks.sh_p_reg.start = glks.avail_p_reg.start;
-    glks.sh_p_reg.end = glks.sh_p_reg.start + (cmdline_opt.num_sh_frames << PAGE_BITS);
-    if (glks.sh_p_reg.end > glks.avail_p_reg.end || glks.sh_p_reg.end < glks.sh_p_reg.start) {
-        printf("Not enough usable physical memory to allocate shared region\n");
+    if (!platAddDevices()) {
         return false;
     }
 
-    /* exclude shared region from available memory */
-    assert(glks.avail_p_reg.start == glks.sh_p_reg.start);
-    glks.avail_p_reg.start = glks.sh_p_reg.end;
+    /* Total number of cores we intend to boot */
+    ksNumCPUs = boot_state.num_cpus;
 
-    discover_devices();
-
-    printf("Starting node #0\n");
-    if (!try_boot_node()) {
+    printf("Starting node #0 with APIC ID %lu\n", boot_state.cpus[0]);
+    if (!try_boot_sys_node(boot_state.cpus[0])) {
         return false;
     }
 
-#ifdef CONFIG_IRQ_IOAPIC
-    /* Now that NDKS have been lifted we can access the IOAPIC and program it */
-    ioapic_init(glks.num_nodes, glks.cpu_list, glks.num_ioapic);
-#endif
-
-    /* start up other CPUs and initialise their nodes */
-    for (i = 1; i < glks.num_nodes; i++) {
-        printf("Starting node #%d\n", i);
-        start_cpu(glks.cpu_list[i], BOOT_NODE_PADDR);
+    if (config_set(CONFIG_IRQ_IOAPIC)) {
+        ioapic_init(1, boot_state.cpus, boot_state.num_ioapic);
     }
+
+    /* initialize BKL before booting up APs */
+    SMP_COND_STATEMENT(clh_lock_init());
+    SMP_COND_STATEMENT(start_boot_aps());
+
+    /* grab BKL before leaving the kernel */
+    NODE_LOCK_SYS;
+
+    printf("Booting all finished, dropped to user space\n");
+
     return true;
 }
 
-BOOT_CODE VISIBLE void
-boot_sys(
-    unsigned long multiboot_magic,
-    multiboot_info_t* mbi,
-    uint32_t apic_khz)
+static BOOT_CODE bool_t try_boot_sys_mbi1(
+    multiboot_info_t *mbi
+)
 {
-    bool_t result;
-    result = try_boot_sys(multiboot_magic, mbi, apic_khz);
+    word_t i;
+    multiboot_module_t *modules = (multiboot_module_t *)(word_t)mbi->part1.mod_list;
+
+    cmdline_parse((const char *)(word_t)mbi->part1.cmdline, &cmdline_opt);
+
+    if ((mbi->part1.flags & MULTIBOOT_INFO_MEM_FLAG) == 0) {
+        printf("Boot loader did not provide information about physical memory size\n");
+        return false;
+    }
+
+    if (!(mbi->part1.flags & MULTIBOOT_INFO_MODS_FLAG)) {
+        printf("Boot loader did not provide information about boot modules\n");
+        return false;
+    }
+
+    printf("Detected %d boot module(s):\n", mbi->part1.mod_count);
+
+    if (mbi->part1.mod_count < 1) {
+        printf("Expect at least one boot module (containing a userland image)\n");
+        return false;
+    }
+
+    for (i = 0; i < mbi->part1.mod_count; i++) {
+        printf(
+            "  module #%ld: start=0x%x end=0x%x size=0x%x name='%s'\n",
+            i,
+            modules[i].start,
+            modules[i].end,
+            modules[i].end - modules[i].start,
+            (char *)(long)modules[i].name
+        );
+        if ((sword_t)(modules[i].end - modules[i].start) <= 0) {
+            printf("Invalid boot module size! Possible cause: boot module file not found by QEMU\n");
+            return false;
+        }
+        if (boot_state.mods_end_paddr < modules[i].end) {
+            boot_state.mods_end_paddr = modules[i].end;
+        }
+    }
+
+    /* initialize the memory. We track two kinds of memory regions. Physical memory
+     * that we will use for the kernel, and physical memory regions that we must
+     * not give to the user. Memory regions that must not be given to the user
+     * include all the physical memory in the kernel window, but also includes any
+     * important or kernel devices. */
+    boot_state.mem_p_regs.count = 0;
+    init_allocated_p_regions();
+    if (mbi->part1.flags & MULTIBOOT_INFO_MMAP_FLAG) {
+        if (!parse_mem_map(mbi->part2.mmap_length, mbi->part2.mmap_addr)) {
+            return false;
+        }
+        uint32_t multiboot_mmap_length = mbi->part2.mmap_length;
+        if (multiboot_mmap_length > (SEL4_MULTIBOOT_MAX_MMAP_ENTRIES * sizeof(seL4_X86_mb_mmap_t))) {
+            multiboot_mmap_length = SEL4_MULTIBOOT_MAX_MMAP_ENTRIES * sizeof(seL4_X86_mb_mmap_t);
+            printf("Warning: Multiboot has reported more memory map entries, %zd, "
+                   "than the max amount that will be passed in the bootinfo, %d. "
+                   "These extra regions will still be turned into untyped caps.",
+                   multiboot_mmap_length / sizeof(seL4_X86_mb_mmap_t), SEL4_MULTIBOOT_MAX_MMAP_ENTRIES);
+        }
+        memcpy(&boot_state.mb_mmap_info.mmap, (void *)(word_t)mbi->part2.mmap_addr, multiboot_mmap_length);
+        boot_state.mb_mmap_info.mmap_length = multiboot_mmap_length;
+    } else {
+        /* calculate memory the old way */
+        p_region_t avail;
+        avail.start = HIGHMEM_PADDR;
+        avail.end = ROUND_DOWN(avail.start + (mbi->part1.mem_upper << 10), PAGE_BITS);
+        if (!add_mem_p_regs(avail)) {
+            return false;
+        }
+    }
+
+    /* copy VESA information from multiboot header */
+    if ((mbi->part1.flags & MULTIBOOT_INFO_GRAPHICS_FLAG) == 0) {
+        boot_state.vbe_info.vbeMode = -1;
+        printf("Multiboot gave us no video information\n");
+    } else {
+        boot_state.vbe_info.vbeInfoBlock = *(seL4_VBEInfoBlock_t *)(seL4_Word)mbi->part2.vbe_control_info;
+        boot_state.vbe_info.vbeModeInfoBlock = *(seL4_VBEModeInfoBlock_t *)(seL4_Word)mbi->part2.vbe_mode_info;
+        boot_state.vbe_info.vbeMode = mbi->part2.vbe_mode;
+        printf("Got VBE info in multiboot. Current video mode is %d\n", mbi->part2.vbe_mode);
+        boot_state.vbe_info.vbeInterfaceSeg = mbi->part2.vbe_interface_seg;
+        boot_state.vbe_info.vbeInterfaceOff = mbi->part2.vbe_interface_off;
+        boot_state.vbe_info.vbeInterfaceLen = mbi->part2.vbe_interface_len;
+    }
+
+    boot_state.mem_lower = mbi->part1.mem_lower;
+    boot_state.boot_module_start = modules->start;
+
+    /* Initialize ACPI */
+    if (!acpi_init(&boot_state.acpi_rsdp)) {
+        return false;
+    }
+
+    return true;
+}
+
+static BOOT_CODE bool_t try_boot_sys_mbi2(
+    multiboot2_header_t *mbi2
+)
+{
+    int mod_count                  = 0;
+    multiboot2_tag_t const *tag   = (multiboot2_tag_t *)(mbi2 + 1);
+    multiboot2_tag_t const *tag_e = (multiboot2_tag_t *)((word_t)mbi2 + mbi2->total_size);
+
+    /* initialize the memory. We track two kinds of memory regions. Physical memory
+     * that we will use for the kernel, and physical memory regions that we must
+     * not give to the user. Memory regions that must not be given to the user
+     * include all the physical memory in the kernel window, but also includes any
+     * important or kernel devices. */
+    boot_state.mem_p_regs.count = 0;
+    init_allocated_p_regions();
+    boot_state.mb_mmap_info.mmap_length = 0;
+    boot_state.vbe_info.vbeMode = -1;
+
+    while (tag < tag_e && tag->type != MULTIBOOT2_TAG_END) {
+        word_t const behind_tag = (word_t)tag + sizeof(*tag);
+
+        if (tag->type == MULTIBOOT2_TAG_CMDLINE) {
+            char const *const cmdline = (char const * const)(behind_tag);
+            cmdline_parse(cmdline, &cmdline_opt);
+        } else if (tag->type == MULTIBOOT2_TAG_ACPI_1) {
+            if (ACPI_V1_SIZE == tag->size - sizeof(*tag)) {
+                memcpy(&boot_state.acpi_rsdp, (void *)behind_tag, tag->size - sizeof(*tag));
+            }
+        } else if (tag->type == MULTIBOOT2_TAG_ACPI_2) {
+            if (sizeof(boot_state.acpi_rsdp) == tag->size - sizeof(*tag)) {
+                memcpy(&boot_state.acpi_rsdp, (void *)behind_tag, sizeof(boot_state.acpi_rsdp));
+            }
+        } else if (tag->type == MULTIBOOT2_TAG_MODULE) {
+            multiboot2_module_t const *module = (multiboot2_module_t const *)behind_tag;
+            printf(
+                "  module #%d: start=0x%x end=0x%x size=0x%x name='%s'\n",
+                mod_count,
+                module->start,
+                module->end,
+                module->end - module->start,
+                module->string
+            );
+
+            if (mod_count == 0) {
+                boot_state.boot_module_start = module->start;
+            }
+
+            mod_count ++;
+            if ((sword_t)(module->end - module->start) <= 0) {
+                printf("Invalid boot module size! Possible cause: boot module file not found\n");
+                return false;
+            }
+            if (boot_state.mods_end_paddr < module->end) {
+                boot_state.mods_end_paddr = module->end;
+            }
+        } else if (tag->type == MULTIBOOT2_TAG_MEMORY) {
+            multiboot2_memory_t const *s = (multiboot2_memory_t *)(behind_tag + 8);
+            multiboot2_memory_t const *e = (multiboot2_memory_t *)((word_t)tag + tag->size);
+
+            for (multiboot2_memory_t const *m = s; m < e; m++) {
+                if (!m->addr) {
+                    boot_state.mem_lower = m->size;
+                }
+
+                printf("\tPhysical Memory Region from %llx size %llx type %u\n", m->addr, m->size, m->type);
+                if (m->addr != (uint64_t)(word_t)m->addr) {
+                    printf("\t\tPhysical memory region not addressable\n");
+                }
+
+                if (m->type == MULTIBOOT_MMAP_USEABLE_TYPE && m->addr >= HIGHMEM_PADDR) {
+                    if (!add_mem_p_regs((p_region_t) {
+                    m->addr, m->addr + m->size
+                }))
+                    return false;
+                }
+            }
+        } else if (tag->type == MULTIBOOT2_TAG_FB) {
+            multiboot2_fb_t const *fb = (multiboot2_fb_t const *)behind_tag;
+            printf("Got framebuffer info in multiboot2. Current video mode is at physical address=%llx pitch=%u resolution=%ux%u@%u type=%u\n",
+                   fb->addr, fb->pitch, fb->width, fb->height, fb->bpp, fb->type);
+            boot_state.fb_info = *fb;
+        }
+
+        tag = (multiboot2_tag_t const *)((word_t)tag + ROUND_UP(tag->size, 3));
+    }
+
+    printf("Detected %d boot module(s):\n", mod_count);
+
+    if (mod_count < 1) {
+        printf("Expect at least one boot module (containing a userland image)\n");
+        return false;
+    }
+
+    return true;
+}
+
+BOOT_CODE VISIBLE void boot_sys(
+    unsigned long multiboot_magic,
+    void *mbi)
+{
+    bool_t result = false;
+
+    if (multiboot_magic == MULTIBOOT_MAGIC) {
+        result = try_boot_sys_mbi1(mbi);
+    } else if (multiboot_magic == MULTIBOOT2_MAGIC) {
+        result = try_boot_sys_mbi2(mbi);
+    } else {
+        printf("Boot loader is not multiboot 1 or 2 compliant %lx\n", multiboot_magic);
+    }
+
+    if (result) {
+        result = try_boot_sys();
+    }
 
     if (!result) {
         fail("boot_sys failed for some reason :(\n");
     }
+
+    ARCH_NODE_STATE(x86KScurInterrupt) = int_invalid;
+    ARCH_NODE_STATE(x86KSPendingInterrupt) = int_invalid;
+
+    schedule();
+    activateThread();
 }
 

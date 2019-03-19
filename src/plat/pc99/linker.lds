@@ -13,10 +13,24 @@
 ENTRY(_start)
 
 /* WARNING: constants also defined in plat/machine/hardware.h */
+#if defined(CONFIG_ARCH_IA32)
+#undef i386
 PADDR_BASE = 0x00000000;
 PADDR_LOAD = 0x00100000;
-PPTR_BASE  = 0xe0000000;
-BASE_OFFSET = PPTR_BASE - PADDR_BASE;
+KERNEL_BASE  = 0xe0000000;
+OUTPUT_ARCH(i386)
+OUTPUT_FORMAT(elf32-i386)
+#elif defined(CONFIG_ARCH_X86_64)
+PADDR_BASE = 0x00000000;
+PADDR_LOAD = 0x00100000;
+KERNEL_BASE = 0xffffffff80000000;
+OUTPUT_FORMAT(elf64-x86-64)
+#if defined(ENABLE_SMP_SUPPORT) && defined(CONFIG_KERNEL_SKIM_WINDOW)
+nodeSkimScratchOffset = nodeSkimScratch - node_info;
+#endif
+#endif
+
+KERNEL_OFFSET = KERNEL_BASE - PADDR_BASE;
 
 SECTIONS
 {
@@ -29,76 +43,99 @@ SECTIONS
     {
         *(.mbh)
         *(.phys.text)
-        _boot_stack_bottom = .;
+        *(.phys.data)
+        . = ALIGN(4K);
+    }
+
+    .phys.bss ADDR(.phys) + SIZEOF(.phys) (NOLOAD) :
+    {
+        boot_stack_bottom = .;
         . = . + 2K;
         . = ALIGN(4K);
-        _boot_stack_top = .;
-        *(.phys)
-        *(.phys.*)
+        boot_stack_top = .;
+        *(.phys.bss)
     }
 
-    . = . + BASE_OFFSET;
+    . = . + KERNEL_OFFSET;
 
-    .boot . : AT(ADDR(.boot) - BASE_OFFSET)
+    .boot . : AT(ADDR(.boot) - KERNEL_OFFSET)
     {
         *(.boot.text)
-        *(.boot.glob)
-        . = ALIGN(4K);
+        *(.boot.data)
     }
 
-    ki_boot_end = .;
+    .boot.bss . (NOLOAD) : AT(ADDR(.boot.bss) - KERNEL_OFFSET)
+    {
+        *(.boot.bss)
+        . = ALIGN(4K);
+    }
+#ifdef CONFIG_KERNEL_SKIM_WINDOW
+    /* Align up so that the SKIM portion of the kernel is by itself
+       on large pages */
+#ifdef CONFIG_ARCH_IA32
+    . = ALIGN(4M);
+#else
+    . = ALIGN(2M);
+#endif
+#endif
 
-    .text . : AT(ADDR(.text) - BASE_OFFSET)
+    ki_boot_end = .;
+    ki_skim_start = .;
+
+    .text . : AT(ADDR(.text) - KERNEL_OFFSET)
     {
         *(.text)
     }
 
-    .rodata . : AT(ADDR(.rodata) - BASE_OFFSET)
+    .rodata . : AT(ADDR(.rodata) - KERNEL_OFFSET)
     {
         *(.rodata)
         *(.rodata.*)
     }
 
-    .glob . : AT(ADDR(.glob) - BASE_OFFSET)
+    .skim_data . : AT(ADDR(.skim_data) - KERNEL_OFFSET)
     {
-        *(.glob)
+        *(.skim.data)
+        *(.skim.data.*)
     }
-    
-    .data . : AT(ADDR(.data) - BASE_OFFSET)
+
+    .skim_bss . : AT(ADDR(.skim_bss) - KERNEL_OFFSET)
+    {
+        *(.skim.bss)
+        *(.skim.bss.*)
+    }
+
+#ifdef CONFIG_KERNEL_SKIM_WINDOW
+    /* Align up so that the SKIM portion of the kernel is by itself
+       on large pages */
+#ifdef CONFIG_ARCH_IA32
+    . = ALIGN(4M);
+#else
+    . = ALIGN(2M);
+#endif
+#endif
+    ki_skim_end = .;
+
+    .data . : AT(ADDR(.data) - KERNEL_OFFSET)
     {
         *(.data)
     }
 
-    . = ALIGN(4K);
-    ki_end = .;
-
-    /* The NDKS section is allocated and mapped per node in boot_sys.c */
-
-#ifdef CONFIG_PAE_PAGING
-    .ndks 0xffe01000 (DSECT) :
-#else
-    .ndks 0xffc01000 (DSECT) :
-#endif
+    .bss . : AT(ADDR(.bss) - KERNEL_OFFSET)
     {
-        _ndks_start = .;
-
-        /*
-         * Due to stupid ld behaviour, we can't simply allocate the stack here
-         * using ". = . + ALIGN(4K)" because that makes .ndks appear in the
-         * program headers of the ELF file (which is wrong).
-         *
-         * Instead, we define the stack in C in the .ndks.stack section, which
-         * makes it appear here.
-         */
-        _kernel_stack_bottom = .;
-        *(.ndks.stack)
-        _kernel_stack_top = .;
-
-        *(.boot.node)
         *(.bss)
         *(COMMON)
-        _ndks_end = .;
     }
+
+    .ehframe : AT(ADDR(.ehframe) - KERNEL_OFFSET)
+    {
+        _ehframe = .;
+        *(.eh_frame)
+        . = ALIGN(4K);
+    }
+
+    . = ALIGN(4K);
+    ki_end = .;
 
     /DISCARD/ :
     {

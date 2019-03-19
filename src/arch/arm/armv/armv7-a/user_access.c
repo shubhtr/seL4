@@ -8,8 +8,9 @@
  * @TAG(GD_GPL)
  */
 
-#include <machine/hardware.h>
+#include <plat/machine/hardware.h>
 #include <arch/user_access.h>
+#include <mode/machine/debug.h>
 
 #define PMUSERENR_ENABLE BIT(0)
 
@@ -18,24 +19,32 @@
 #define CNTKCTL_PL0VTEN  BIT(8)
 #define CNTKCTL_PL0PTEN  BIT(9)
 
-#define ID_DFR0_PMU_MASK (0xf << 28)
-#define ID_DFR0_PMU_NONE (0xf << 28)
+#define ID_DFR0_PMU_MASK (0xful << 28)
+#define ID_DFR0_PMU_NONE (0xful << 28)
 
 #define ID_PFR1_GENERIC_TIMER BIT(16)
 
-static void
-check_export_pmu(void)
+
+
+static void check_export_pmu(void)
 {
 #ifdef CONFIG_EXPORT_PMU_USER
     /* Export performance counters */
     uint32_t v;
     v = PMUSERENR_ENABLE;
     MCR(PMUSERENR, v);
+
+    /* enable user-level pmu event counter if we're in secure mode */
+    if (!(readDscrCp() & DBGDSCR_SECURE_MODE_DISABLED)) {
+        MRC(DBGSDER, v);
+        v |= DBGSDER_ENABLE_SECURE_USER_NON_INVASIVE_DEBUG;
+        MCR(DBGSDER, v);
+    }
 #endif
 }
 
-static void
-check_export_arch_timer(void)
+
+static void check_export_arch_timer(void)
 {
     uint32_t v;
     MRC(CNTKCTL, v);
@@ -48,8 +57,8 @@ check_export_arch_timer(void)
     MCR(CNTKCTL, v);
 }
 
-void
-armv_init_user_access(void)
+
+void armv_init_user_access(void)
 {
     uint32_t v;
     /* Performance Monitoring Unit */

@@ -11,14 +11,9 @@
 #ifndef __PLAT_MACHINE_H
 #define __PLAT_MACHINE_H
 
-#define N_INTERRUPTS 128
-
 enum IRQConstants {
-    DMTIMER0_IRQ = 66,
     maxIRQ = 127
 } platform_interrupt_t;
-
-#define KERNEL_TIMER_IRQ    DMTIMER0_IRQ
 
 enum irqNumbers {
     irqInvalid = 255

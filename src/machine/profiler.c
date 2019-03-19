@@ -43,10 +43,9 @@ profiler_entry_t profiler_entries[MAX_UNIQUE_INSTRUCTIONS];
 bool_t profiler_enabled VISIBLE = true;
 
 #ifdef CHECKPOINT_PROFILER
-void
-profiler_reset(void)
+void profiler_reset(void)
 {
-    unsigned int i;
+    word_t i;
 
     for (i = 0; i < MAX_UNIQUE_CHECKPOINTS; i++) {
         profiler_entries[i].pc = 0;
@@ -55,8 +54,7 @@ profiler_reset(void)
     checkpoint = 0;
 }
 
-void
-profiler_list(void)
+void profiler_list(void)
 {
     unsigned int samples, i, count;
 
@@ -75,8 +73,7 @@ profiler_list(void)
     printf("%u checkpoints, %u sample(s)\n", count, samples);
 }
 
-void
-profiler_record_sample(word_t pc)
+void profiler_record_sample(word_t pc)
 {
     if (checkpoint > max_checkpoint) {
         max_checkpoint = checkpoint;
@@ -93,7 +90,7 @@ profiler_record_sample(word_t pc)
  */
 void profiler_reset(void)
 {
-    for (unsigned int i = 0; i < MAX_UNIQUE_INSTRUCTIONS; i++) {
+    for (word_t i = 0; i < MAX_UNIQUE_INSTRUCTIONS; i++) {
         profiler_entries[i].pc = 0;
         profiler_entries[i].count = 0;
     }
@@ -113,7 +110,7 @@ void profiler_list(void)
 
     /* Print out each address */
     samples = 0;
-    for (unsigned int i = 0; i < MAX_UNIQUE_INSTRUCTIONS; i++) {
+    for (word_t i = 0; i < MAX_UNIQUE_INSTRUCTIONS; i++) {
         if (profiler_entries[i].pc != 0) {
             printf("%x %d\n", (unsigned int)profiler_entries[i].pc,
                    (int)profiler_entries[i].count);

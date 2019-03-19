@@ -13,18 +13,23 @@
 #include <util.h>
 
 /*
+ * memzero needs a custom type that allows us to use a word
+ * that has the aliasing properties of a char.
+ */
+typedef unsigned long __attribute__((__may_alias__)) ulong_alias;
+
+/*
  * Zero 'n' bytes of memory starting from 's'.
  *
  * 'n' and 's' must be word aligned.
  */
-void
-memzero(void *s, unsigned int n)
+void memzero(void *s, unsigned long n)
 {
     uint8_t *p = s;
 
     /* Ensure alignment constraints are met. */
-    assert((unsigned int)s % 4 == 0);
-    assert(n % 4 == 0);
+    assert((unsigned long)s % sizeof(unsigned long) == 0);
+    assert(n % sizeof(unsigned long) == 0);
 
     /* We will never memzero an area larger than the largest current
        live object */
@@ -33,14 +38,13 @@ memzero(void *s, unsigned int n)
 
     /* Write out words. */
     while (n != 0) {
-        *(uint32_t *)p = 0;
-        p += 4;
-        n -= 4;
+        *(ulong_alias *)p = 0;
+        p += sizeof(ulong_alias);
+        n -= sizeof(ulong_alias);
     }
 }
 
-void*
-memset(void *s, unsigned int c, unsigned int n)
+void *VISIBLE memset(void *s, unsigned long c, unsigned long n)
 {
     uint8_t *p;
 
@@ -48,7 +52,7 @@ memset(void *s, unsigned int c, unsigned int n)
      * If we are only writing zeros and we are word aligned, we can
      * use the optimized 'memzero' function.
      */
-    if (likely(c == 0 && ((uint32_t)s % 4) == 0 && (n % 4) == 0)) {
+    if (likely(c == 0 && ((unsigned long)s % sizeof(unsigned long)) == 0 && (n % sizeof(unsigned long)) == 0)) {
         memzero(s, n);
     } else {
         /* Otherwise, we use a slower, simple memset. */
@@ -60,8 +64,7 @@ memset(void *s, unsigned int c, unsigned int n)
     return s;
 }
 
-void*
-memcpy(void* ptr_dst, const void* ptr_src, unsigned int n)
+void *VISIBLE memcpy(void *ptr_dst, const void *ptr_src, unsigned long n)
 {
     uint8_t *p;
     const uint8_t *q;
@@ -73,14 +76,13 @@ memcpy(void* ptr_dst, const void* ptr_src, unsigned int n)
     return ptr_dst;
 }
 
-int
-strncmp(const char* s1, const char* s2, int n)
+int PURE strncmp(const char *s1, const char *s2, int n)
 {
-    unsigned int i;
+    word_t i;
     int diff;
 
     for (i = 0; i < n; i++) {
-        diff = ((unsigned char*)s1)[i] - ((unsigned char*)s2)[i];
+        diff = ((unsigned char *)s1)[i] - ((unsigned char *)s2)[i];
         if (diff != 0 || s1[i] == '\0') {
             return diff;
         }
@@ -89,8 +91,7 @@ strncmp(const char* s1, const char* s2, int n)
     return 0;
 }
 
-int CONST
-char_to_int(char c)
+long CONST char_to_long(char c)
 {
     if (c >= '0' && c <= '9') {
         return c - '0';
@@ -102,12 +103,11 @@ char_to_int(char c)
     return -1;
 }
 
-int PURE
-str_to_int(const char* str)
+long PURE str_to_long(const char *str)
 {
     unsigned int base;
-    int res;
-    int val = 0;
+    long res;
+    long val = 0;
     char c;
 
     /*check for "0x" */
@@ -124,7 +124,7 @@ str_to_int(const char* str)
 
     c = *str;
     while (c != '\0') {
-        res = char_to_int(c);
+        res = char_to_long(c);
         if (res == -1 || res >= base) {
             return -1;
         }
@@ -135,3 +135,45 @@ str_to_int(const char* str)
 
     return val;
 }
+
+#ifdef CONFIG_ARCH_RISCV
+uint32_t __clzsi2(uint32_t x)
+{
+    uint32_t count = 0;
+    while (!(x & 0x80000000U) && count < 34) {
+        x <<= 1;
+        count++;
+    }
+    return count;
+}
+
+uint32_t __ctzsi2(uint32_t x)
+{
+    uint32_t count = 0;
+    while (!(x & 0x000000001) && count <= 32) {
+        x >>= 1;
+        count++;
+    }
+    return count;
+}
+
+uint32_t __clzdi2(uint64_t x)
+{
+    uint32_t count = 0;
+    while (!(x & 0x8000000000000000U) && count < 65) {
+        x <<= 1;
+        count++;
+    }
+    return count;
+}
+
+uint32_t __ctzdi2(uint64_t x)
+{
+    uint32_t count = 0;
+    while (!(x & 0x00000000000000001) && count <= 64) {
+        x >>= 1;
+        count++;
+    }
+    return count;
+}
+#endif /* CONFIG_ARCH_RISCV */

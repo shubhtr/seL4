@@ -13,32 +13,29 @@
 #include <kernel/vspace.h>
 #include <machine/registerset.h>
 #include <model/statedata.h>
-#include <object/asyncendpoint.h>
+#include <object/notification.h>
 #include <object/cnode.h>
 #include <object/endpoint.h>
 #include <object/tcb.h>
 
-static inline tcb_queue_t PURE
-ep_ptr_get_queue(endpoint_t *epptr)
+static inline tcb_queue_t PURE ep_ptr_get_queue(endpoint_t *epptr)
 {
     tcb_queue_t queue;
 
-    queue.head = (tcb_t*)endpoint_ptr_get_epQueue_head(epptr);
-    queue.end = (tcb_t*)endpoint_ptr_get_epQueue_tail(epptr);
+    queue.head = (tcb_t *)endpoint_ptr_get_epQueue_head(epptr);
+    queue.end = (tcb_t *)endpoint_ptr_get_epQueue_tail(epptr);
 
     return queue;
 }
 
-static inline void
-ep_ptr_set_queue(endpoint_t *epptr, tcb_queue_t queue)
+static inline void ep_ptr_set_queue(endpoint_t *epptr, tcb_queue_t queue)
 {
     endpoint_ptr_set_epQueue_head(epptr, (word_t)queue.head);
     endpoint_ptr_set_epQueue_tail(epptr, (word_t)queue.end);
 }
 
-void
-sendIPC(bool_t blocking, bool_t do_call, word_t badge,
-        bool_t canGrant, tcb_t *thread, endpoint_t *epptr)
+void sendIPC(bool_t blocking, bool_t do_call, word_t badge,
+             bool_t canGrant, bool_t canGrantReply, tcb_t *thread, endpoint_t *epptr)
 {
     switch (endpoint_ptr_get_state(epptr)) {
     case EPState_Idle:
@@ -49,12 +46,14 @@ sendIPC(bool_t blocking, bool_t do_call, word_t badge,
             /* Set thread state to BlockedOnSend */
             thread_state_ptr_set_tsType(&thread->tcbState,
                                         ThreadState_BlockedOnSend);
-            thread_state_ptr_set_blockingIPCEndpoint(
+            thread_state_ptr_set_blockingObject(
                 &thread->tcbState, EP_REF(epptr));
             thread_state_ptr_set_blockingIPCBadge(
                 &thread->tcbState, badge);
             thread_state_ptr_set_blockingIPCCanGrant(
                 &thread->tcbState, canGrant);
+            thread_state_ptr_set_blockingIPCCanGrantReply(
+                &thread->tcbState, canGrantReply);
             thread_state_ptr_set_blockingIPCIsCall(
                 &thread->tcbState, do_call);
 
@@ -71,7 +70,7 @@ sendIPC(bool_t blocking, bool_t do_call, word_t badge,
     case EPState_Recv: {
         tcb_queue_t queue;
         tcb_t *dest;
-        bool_t diminish;
+        bool_t replyCanGrant;
 
         /* Get the head of the endpoint queue. */
         queue = ep_ptr_get_queue(epptr);
@@ -89,17 +88,16 @@ sendIPC(bool_t blocking, bool_t do_call, word_t badge,
         }
 
         /* Do the transfer */
-        diminish =
-            thread_state_get_blockingIPCDiminishCaps(dest->tcbState);
-        doIPCTransfer(thread, epptr, badge, canGrant, dest, diminish);
+        doIPCTransfer(thread, epptr, badge, canGrant, dest);
+
+        replyCanGrant = thread_state_ptr_get_blockingIPCCanGrant(&dest->tcbState);;
 
         setThreadState(dest, ThreadState_Running);
-        attemptSwitchTo(dest);
+        possibleSwitchTo(dest);
 
-        if (do_call ||
-                fault_ptr_get_faultType(&thread->tcbFault) != fault_null_fault) {
-            if (canGrant && !diminish) {
-                setupCallerCap(thread, dest);
+        if (do_call) {
+            if (canGrant || canGrantReply) {
+                setupCallerCap(thread, dest, replyCanGrant);
             } else {
                 setThreadState(thread, ThreadState_Inactive);
             }
@@ -110,114 +108,121 @@ sendIPC(bool_t blocking, bool_t do_call, word_t badge,
     }
 }
 
-void
-receiveIPC(tcb_t *thread, cap_t cap)
+void receiveIPC(tcb_t *thread, cap_t cap, bool_t isBlocking)
 {
     endpoint_t *epptr;
-    bool_t diminish;
+    notification_t *ntfnPtr;
 
     /* Haskell error "receiveIPC: invalid cap" */
     assert(cap_get_capType(cap) == cap_endpoint_cap);
 
     epptr = EP_PTR(cap_endpoint_cap_get_capEPPtr(cap));
-    diminish = !cap_endpoint_cap_get_capCanSend(cap);
 
-    switch (endpoint_ptr_get_state(epptr)) {
-    case EPState_Idle:
-    case EPState_Recv: {
-        tcb_queue_t queue;
+    /* Check for anything waiting in the notification */
+    ntfnPtr = thread->tcbBoundNotification;
+    if (ntfnPtr && notification_ptr_get_state(ntfnPtr) == NtfnState_Active) {
+        completeSignal(ntfnPtr, thread);
+    } else {
+        switch (endpoint_ptr_get_state(epptr)) {
+        case EPState_Idle:
+        case EPState_Recv: {
+            tcb_queue_t queue;
 
-        /* Set thread state to BlockedOnReceive */
-        thread_state_ptr_set_tsType(&thread->tcbState,
-                                    ThreadState_BlockedOnReceive);
-        thread_state_ptr_set_blockingIPCEndpoint(
-            &thread->tcbState, EP_REF(epptr));
-        thread_state_ptr_set_blockingIPCDiminishCaps(
-            &thread->tcbState, diminish);
+            if (isBlocking) {
+                /* Set thread state to BlockedOnReceive */
+                thread_state_ptr_set_tsType(&thread->tcbState,
+                                            ThreadState_BlockedOnReceive);
+                thread_state_ptr_set_blockingObject(
+                    &thread->tcbState, EP_REF(epptr));
+                thread_state_ptr_set_blockingIPCCanGrant(
+                    &thread->tcbState, cap_endpoint_cap_get_capCanGrant(cap));
 
-        scheduleTCB(thread);
+                scheduleTCB(thread);
 
-        /* Place calling thread in endpoint queue */
-        queue = ep_ptr_get_queue(epptr);
-        queue = tcbEPAppend(thread, queue);
-        endpoint_ptr_set_state(epptr, EPState_Recv);
-        ep_ptr_set_queue(epptr, queue);
-        break;
-    }
-
-    case EPState_Send: {
-        tcb_queue_t queue;
-        tcb_t *sender;
-        word_t badge;
-        bool_t canGrant;
-        bool_t do_call;
-
-        /* Get the head of the endpoint queue. */
-        queue = ep_ptr_get_queue(epptr);
-        sender = queue.head;
-
-        /* Haskell error "Send endpoint queue must not be empty" */
-        assert(sender);
-
-        /* Dequeue the first TCB */
-        queue = tcbEPDequeue(sender, queue);
-        ep_ptr_set_queue(epptr, queue);
-
-        if (!queue.head) {
-            endpoint_ptr_set_state(epptr, EPState_Idle);
-        }
-
-        /* Get sender IPC details */
-        badge = thread_state_ptr_get_blockingIPCBadge(&sender->tcbState);
-        canGrant =
-            thread_state_ptr_get_blockingIPCCanGrant(&sender->tcbState);
-
-        /* Do the transfer */
-        doIPCTransfer(sender, epptr, badge,
-                      canGrant, thread, diminish);
-
-        do_call = thread_state_ptr_get_blockingIPCIsCall(&sender->tcbState);
-
-        if (do_call ||
-                fault_get_faultType(sender->tcbFault) != fault_null_fault) {
-            if (canGrant && !diminish) {
-                setupCallerCap(sender, thread);
+                /* Place calling thread in endpoint queue */
+                queue = ep_ptr_get_queue(epptr);
+                queue = tcbEPAppend(thread, queue);
+                endpoint_ptr_set_state(epptr, EPState_Recv);
+                ep_ptr_set_queue(epptr, queue);
             } else {
-                setThreadState(sender, ThreadState_Inactive);
+                doNBRecvFailedTransfer(thread);
             }
-        } else {
-            setThreadState(sender, ThreadState_Running);
-            switchIfRequiredTo(sender);
+            break;
         }
 
-        break;
-    }
+        case EPState_Send: {
+            tcb_queue_t queue;
+            tcb_t *sender;
+            word_t badge;
+            bool_t canGrant;
+            bool_t canGrantReply;
+            bool_t do_call;
+
+            /* Get the head of the endpoint queue. */
+            queue = ep_ptr_get_queue(epptr);
+            sender = queue.head;
+
+            /* Haskell error "Send endpoint queue must not be empty" */
+            assert(sender);
+
+            /* Dequeue the first TCB */
+            queue = tcbEPDequeue(sender, queue);
+            ep_ptr_set_queue(epptr, queue);
+
+            if (!queue.head) {
+                endpoint_ptr_set_state(epptr, EPState_Idle);
+            }
+
+            /* Get sender IPC details */
+            badge = thread_state_ptr_get_blockingIPCBadge(&sender->tcbState);
+            canGrant =
+                thread_state_ptr_get_blockingIPCCanGrant(&sender->tcbState);
+            canGrantReply =
+                thread_state_ptr_get_blockingIPCCanGrantReply(&sender->tcbState);
+
+            /* Do the transfer */
+            doIPCTransfer(sender, epptr, badge,
+                          canGrant, thread);
+
+            do_call = thread_state_ptr_get_blockingIPCIsCall(&sender->tcbState);
+
+            if (do_call) {
+                if (canGrant || canGrantReply) {
+                    setupCallerCap(sender, thread, cap_endpoint_cap_get_capCanGrant(cap));
+                } else {
+                    setThreadState(sender, ThreadState_Inactive);
+                }
+            } else {
+                setThreadState(sender, ThreadState_Running);
+                possibleSwitchTo(sender);
+            }
+
+            break;
+        }
+        }
     }
 }
 
-void
-replyFromKernel_error(tcb_t *thread)
+void replyFromKernel_error(tcb_t *thread)
 {
-    unsigned int len;
+    word_t len;
     word_t *ipcBuffer;
 
     ipcBuffer = lookupIPCBuffer(true, thread);
     setRegister(thread, badgeRegister, 0);
     len = setMRs_syscall_error(thread, ipcBuffer);
     setRegister(thread, msgInfoRegister, wordFromMessageInfo(
-                    message_info_new(current_syscall_error.type, 0, 0, len)));
+                    seL4_MessageInfo_new(current_syscall_error.type, 0, 0, len)));
 }
 
-void
-replyFromKernel_success_empty(tcb_t *thread)
+void replyFromKernel_success_empty(tcb_t *thread)
 {
     setRegister(thread, badgeRegister, 0);
     setRegister(thread, msgInfoRegister, wordFromMessageInfo(
-                    message_info_new(0, 0, 0, 0)));
+                    seL4_MessageInfo_new(0, 0, 0, 0)));
 }
 
-void
-ipcCancel(tcb_t *tptr)
+void cancelIPC(tcb_t *tptr)
 {
     thread_state_t *state = &tptr->tcbState;
 
@@ -228,7 +233,7 @@ ipcCancel(tcb_t *tptr)
         endpoint_t *epptr;
         tcb_queue_t queue;
 
-        epptr = EP_PTR(thread_state_ptr_get_blockingIPCEndpoint(state));
+        epptr = EP_PTR(thread_state_ptr_get_blockingObject(state));
 
         /* Haskell error "blockedIPCCancel: endpoint must not be idle" */
         assert(endpoint_ptr_get_state(epptr) != EPState_Idle);
@@ -246,15 +251,15 @@ ipcCancel(tcb_t *tptr)
         break;
     }
 
-    case ThreadState_BlockedOnAsyncEvent:
-        asyncIPCCancel(tptr,
-                       AEP_PTR(thread_state_ptr_get_blockingIPCEndpoint(state)));
+    case ThreadState_BlockedOnNotification:
+        cancelSignal(tptr,
+                     NTFN_PTR(thread_state_ptr_get_blockingObject(state)));
         break;
 
     case ThreadState_BlockedOnReply: {
         cte_t *slot, *callerCap;
 
-        fault_null_fault_ptr_new(&tptr->tcbFault);
+        tptr->tcbFault = seL4_Fault_NullFault_new();
 
         /* Get the reply cap slot */
         slot = TCB_PTR_CTE_PTR(tptr, tcbReply);
@@ -271,8 +276,7 @@ ipcCancel(tcb_t *tptr)
     }
 }
 
-void
-epCancelAll(endpoint_t *epptr)
+void cancelAllIPC(endpoint_t *epptr)
 {
     switch (endpoint_ptr_get_state(epptr)) {
     case EPState_Idle:
@@ -288,8 +292,8 @@ epCancelAll(endpoint_t *epptr)
 
         /* Set all blocked threads to restart */
         for (; thread; thread = thread->tcbEPNext) {
-            setThreadState (thread, ThreadState_Restart);
-            tcbSchedEnqueue(thread);
+            setThreadState(thread, ThreadState_Restart);
+            SCHED_ENQUEUE(thread);
         }
 
         rescheduleRequired();
@@ -298,8 +302,7 @@ epCancelAll(endpoint_t *epptr)
     }
 }
 
-void
-epCancelBadgedSends(endpoint_t *epptr, word_t badge)
+void cancelBadgedSends(endpoint_t *epptr, word_t badge)
 {
     switch (endpoint_ptr_get_state(epptr)) {
     case EPState_Idle:
@@ -323,7 +326,7 @@ epCancelBadgedSends(endpoint_t *epptr, word_t badge)
             next = thread->tcbEPNext;
             if (b == badge) {
                 setThreadState(thread, ThreadState_Restart);
-                tcbSchedEnqueue(thread);
+                SCHED_ENQUEUE(thread);
                 queue = tcbEPDequeue(thread, queue);
             }
         }

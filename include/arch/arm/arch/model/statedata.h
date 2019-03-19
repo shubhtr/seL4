@@ -11,16 +11,27 @@
 #ifndef __ARCH_MODEL_STATEDATA_H
 #define __ARCH_MODEL_STATEDATA_H
 
-#include <types.h>
-#include <arch/types.h>
-#include <util.h>
-#include <object/structures.h>
+#include <config.h>
 
-extern word_t armKSGlobalsFrame[BIT(ARMSmallPageBits) / sizeof(word_t)] VISIBLE;
-extern asid_pool_t *armKSASIDTable[BIT(asidHighBits)] VISIBLE;
-extern asid_t armKSHWASIDTable[BIT(hwASIDBits)] VISIBLE;
-extern hw_asid_t armKSNextASID VISIBLE;
-extern pde_t armKSGlobalPD[BIT(PD_BITS)] VISIBLE;
-extern pte_t armKSGlobalPT[BIT(PT_BITS)] VISIBLE;
+#include <model/statedata.h>
+#include <arch/machine/debug_conf.h>
+#include <mode/machine/registerset.h>
 
+NODE_STATE_BEGIN(archNodeState)
+/* TODO: add ARM-dependent fields here */
+/* Bitmask of all cores should receive the reschedule IPI */
+NODE_STATE_DECLARE(word_t, ipiReschedulePending);
+#ifdef CONFIG_ARM_HYPERVISOR_SUPPORT
+NODE_STATE_DECLARE(vcpu_t, *armHSCurVCPU);
+NODE_STATE_DECLARE(bool_t, armHSVCPUActive);
+#if defined(CONFIG_ARCH_AARCH32) && defined(CONFIG_HAVE_FPU)
+NODE_STATE_DECLARE(bool_t, armHSFPUEnabled);
 #endif
+#endif
+NODE_STATE_END(archNodeState);
+
+#ifdef ARM_BASE_CP14_SAVE_AND_RESTORE
+extern user_breakpoint_state_t armKSNullBreakpointState VISIBLE;
+#endif
+
+#endif /* __ARCH_MODEL_STATEDATA_H */

@@ -12,26 +12,13 @@
 #define ARCH_BENCHMARK_H
 
 #include <config.h>
-#include <arch/object/structures.h>
+#ifdef CONFIG_ENABLE_BENCHMARKS
 
-#ifdef CONFIG_BENCHMARK
-
-/* we have one large page of word sized entries */
-#define MAX_LOG_SIZE (BIT(LARGE_PAGE_BITS) / sizeof(word_t))
-
-extern uint64_t ksEntry;
-extern uint64_t ksExit;
-extern uint32_t ksLogIndex;
-extern uint32_t *ksLog;
-
-#define IA32_KSLOG_IDX (BIT(PD_BITS + PDPT_BITS) - 2)
-
-static inline uint64_t
-timestamp(void)
+static inline uint64_t timestamp(void)
 {
     uint32_t low, high;
 
-    asm volatile (
+    asm volatile(
         "movl $0, %%eax \n"
         "movl $0, %%ecx \n"
         "cpuid          \n"
@@ -41,7 +28,7 @@ timestamp(void)
         "movl $0, %%eax \n"
         "movl $0, %%ecx \n"
         "cpuid          \n"
-        : "=r" (high), "=r" (low)
+        : "=r"(high), "=r"(low)
         : /* no inputs */
         : "eax", "ebx", "ecx", "edx"
     );
@@ -49,5 +36,9 @@ timestamp(void)
     return ((uint64_t) high) << 32llu | (uint64_t) low;
 }
 
-#endif /* CONFIG_BENCHMARK */
+static inline void benchmark_arch_utilisation_reset(void)
+{
+}
+
+#endif /* CONFIG_ENABLE_BENCHMARKS */
 #endif /* ARCH_BENCHMARK_H */

@@ -1,78 +1,70 @@
 /*
- * Copyright 2014, General Dynamics C4 Systems
+ * Copyright 2017, Data61
+ * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
+ * ABN 41 687 119 230.
  *
  * This software may be distributed and modified according to the terms of
  * the GNU General Public License version 2. Note that NO WARRANTY is provided.
  * See "LICENSE_GPLv2.txt" for details.
  *
- * @TAG(GD_GPL)
+ * @TAG(DATA61_GPL)
  */
 
+#include <config.h>
 #include <types.h>
 #include <object.h>
 #include <kernel/vspace.h>
 #include <api/faults.h>
 #include <api/syscall.h>
 
-bool_t
-handleFaultReply(tcb_t *receiver, tcb_t *sender)
+bool_t Arch_handleFaultReply(tcb_t *receiver, tcb_t *sender, word_t faultType)
 {
-    message_info_t tag;
-    word_t label;
-    fault_t fault;
-    unsigned int length;
-
-    /* These lookups are moved inward from doReplyTransfer */
-    tag = messageInfoFromWord(getRegister(sender, msgInfoRegister));
-    label = message_info_get_msgLabel(tag);
-    length = message_info_get_msgLength(tag);
-    fault = receiver->tcbFault;
-
-    switch (fault_get_faultType(fault)) {
-    case fault_cap_fault:
+    switch (faultType) {
+    case seL4_Fault_VMFault:
         return true;
 
-    case fault_vm_fault:
+#ifdef CONFIG_ARM_HYPERVISOR_SUPPORT
+    case seL4_Fault_VGICMaintenance:
         return true;
-
-    case fault_unknown_syscall: {
-        unsigned int i;
-        register_t r;
-        word_t v;
-        word_t *sendBuf;
-
-        sendBuf = lookupIPCBuffer(false, sender);
-
-        /* Assumes n_syscallMessage > n_msgRegisters */
-        for (i = 0; i < length && i < n_msgRegisters; i++) {
-            r = syscallMessage[i];
-            v = getRegister(sender, msgRegisters[i]);
-            setRegister(receiver, r, sanitiseRegister(r, v));
-        }
-
-        if (sendBuf) {
-            for (; i < length && i < n_syscallMessage; i++) {
-                r = syscallMessage[i];
-                v = sendBuf[i + 1];
-                setRegister(receiver, r, sanitiseRegister(r, v));
-            }
-        }
+    case seL4_Fault_VCPUFault:
+        return true;
+#endif
+    default:
+        fail("Invalid fault");
     }
-    return (label == 0);
+}
 
-    case fault_user_exception: {
-        unsigned int i;
-        register_t r;
-        word_t v;
-
-        /* Assumes n_exceptionMessage <= n_msgRegisters */
-        for (i = 0; i < length && i < n_exceptionMessage; i++) {
-            r = exceptionMessage[i];
-            v = getRegister(sender, msgRegisters[i]);
-            setRegister(receiver, r, sanitiseRegister(r, v));
+word_t Arch_setMRs_fault(tcb_t *sender, tcb_t *receiver, word_t *receiveIPCBuffer, word_t faultType)
+{
+    switch (faultType) {
+    case seL4_Fault_VMFault: {
+        if (config_set(CONFIG_ARM_HYPERVISOR_SUPPORT)) {
+            word_t ipa, va;
+            va = getRestartPC(sender);
+            ipa = (addressTranslateS1CPR(va) & ~MASK(PAGE_BITS)) | (va & MASK(PAGE_BITS));
+            setMR(receiver, receiveIPCBuffer, seL4_VMFault_IP, ipa);
+        } else {
+            setMR(receiver, receiveIPCBuffer, seL4_VMFault_IP, getRestartPC(sender));
         }
+        setMR(receiver, receiveIPCBuffer, seL4_VMFault_Addr,
+              seL4_Fault_VMFault_get_address(sender->tcbFault));
+        setMR(receiver, receiveIPCBuffer, seL4_VMFault_PrefetchFault,
+              seL4_Fault_VMFault_get_instructionFault(sender->tcbFault));
+        return setMR(receiver, receiveIPCBuffer, seL4_VMFault_FSR,
+                     seL4_Fault_VMFault_get_FSR(sender->tcbFault));
     }
-    return (label == 0);
+
+#ifdef CONFIG_ARM_HYPERVISOR_SUPPORT
+    case seL4_Fault_VGICMaintenance:
+        if (seL4_Fault_VGICMaintenance_get_idxValid(sender->tcbFault)) {
+            return setMR(receiver, receiveIPCBuffer, seL4_VGICMaintenance_IDX,
+                         seL4_Fault_VGICMaintenance_get_idx(sender->tcbFault));
+        } else {
+            return setMR(receiver, receiveIPCBuffer, seL4_VGICMaintenance_IDX, -1);
+        }
+    case seL4_Fault_VCPUFault:
+        return setMR(receiver, receiveIPCBuffer, seL4_VCPUFault_HSR, seL4_Fault_VCPUFault_get_hsr(sender->tcbFault));
+#endif
 
     default:
         fail("Invalid fault");

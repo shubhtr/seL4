@@ -11,11 +11,13 @@
 #ifndef __PLAT_MACHINE_PCI_H
 #define __PLAT_MACHINE_PCI_H
 
-#define get_pci_bus(x) (((x)>>8) & 0xff)
-#define get_pci_dev(x) (((x)>>3) & 0x1f)
-#define get_pci_fun(x) ((x) & 0x7)
-#define get_dev_id(bus, dev, fun) (((bus) << 8) | ((dev) << 3) | (fun))
+#define get_pci_bus(x) (((x)>>8u) & 0xffu)
+#define get_pci_dev(x) (((x)>>3u) & 0x1fu)
+#define get_pci_fun(x) ((x) & 0x7u)
+#define get_dev_id(bus, dev, fun) (((bus) << 8u) | ((dev) << 3u) | (fun))
 
-void pci_scan(uint32_t* bus_used_bitmap);
+#define PCI_BUS_MAX     255
+#define PCI_DEV_MAX     31
+#define PCI_FUNC_MAX    7
 
 #endif

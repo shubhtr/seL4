@@ -11,21 +11,20 @@
 #ifndef ARCH_BENCHMARK_H
 #define ARCH_BENCHMARK_H
 
-#ifdef CONFIG_BENCHMARK
+#include <config.h>
+#ifdef CONFIG_ENABLE_BENCHMARKS
 
 #include <armv/benchmark.h>
-
-/* We have 1MB of word sized entries */
-#define MAX_LOG_SIZE 262144
-
-extern word_t ksEntry;
-extern word_t ksExit;
-extern word_t ksLogIndex;
-extern word_t *ksLog;
-
+#include <mode/machine.h>
 
 void armv_init_ccnt(void);
 
-#endif /* CONFIG_BENCHMARK */
+static inline timestamp_t timestamp(void)
+{
+    timestamp_t ccnt;
+    SYSTEM_READ_WORD(CCNT, ccnt);
+    return ccnt;
+}
+#endif /* CONFIG_ENABLE_BENCHMARKS */
 
 #endif /* ARCH_BENCHMARK_H */

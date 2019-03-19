@@ -18,55 +18,58 @@
 /* ==== read/write kernel state not preserved across kernel entries ==== */
 
 /* Interrupt currently being handled */
-interrupt_t ia32KScurInterrupt VISIBLE;
+UP_STATE_DEFINE(interrupt_t, x86KScurInterrupt VISIBLE);
+
+UP_STATE_DEFINE(interrupt_t, x86KSPendingInterrupt);
 
 /* ==== proper read/write kernel state ==== */
 
-/* Task State Segment (TSS), contains currently running TCB in ESP0 */
-tss_t ia32KStss VISIBLE;
-
-/* Global Descriptor Table (GDT) */
-gdt_entry_t ia32KSgdt[GDT_ENTRIES];
+x86_arch_global_state_t x86KSGlobalState[CONFIG_MAX_NUM_NODES] ALIGN(L1_CACHE_LINE_SIZE) SKIM_BSS;
 
 /* The top level ASID table */
-asid_pool_t* ia32KSASIDTable[BIT(asidHighBits)];
+asid_pool_t *x86KSASIDTable[BIT(asidHighBits)];
 
-/*
- * Current thread whose state is installed in the FPU, or NULL if
- * the FPU is currently invalid.
- */
-tcb_t *ia32KSfpuOwner VISIBLE;
+/* Current user value of the fs/gs base */
+UP_STATE_DEFINE(word_t, x86KSCurrentFSBase);
+UP_STATE_DEFINE(word_t, x86KSCurrentGSBase);
+
+UP_STATE_DEFINE(word_t, x86KSGPExceptReturnTo);
 
 /* ==== read-only kernel state (only written during bootstrapping) ==== */
 
-/* The privileged kernel mapping PD & PT */
-pdpte_t* ia32KSkernelPDPT;
-pde_t* ia32KSkernelPD;
-pte_t* ia32KSkernelPT;
+/* Defines a translation of cpu ids from an index of our actual CPUs */
+SMP_STATE_DEFINE(cpu_id_mapping_t, cpu_mapping);
 
 /* CPU Cache Line Size */
-uint32_t ia32KScacheLineSizeBits;
-
-/* Interrupt Descriptor Table (IDT) */
-idt_entry_t ia32KSidt[IDT_ENTRIES];
+uint32_t x86KScacheLineSizeBits;
 
 /* A valid initial FPU state, copied to every new thread. */
-user_fpu_state_t ia32KSnullFpuState ALIGN(MIN_FPU_ALIGNMENT);
+user_fpu_state_t x86KSnullFpuState ALIGN(MIN_FPU_ALIGNMENT);
 
-/* Current active page directory. This is really just a shadow of CR3 */
-paddr_t ia32KSCurrentPD VISIBLE;
+/* Number of IOMMUs (DMA Remapping Hardware Units) */
+uint32_t x86KSnumDrhu;
 
 #ifdef CONFIG_IOMMU
-/* Number of IOMMUs (DMA Remapping Hardware Units) */
-uint32_t ia32KSnumDrhu;
-
 /* Intel VT-d Root Entry Table */
-vtd_rte_t* ia32KSvtdRootTable;
-uint32_t ia32KSnumIOPTLevels;
-uint32_t ia32KSnumIODomainIDBits;
+vtd_rte_t *x86KSvtdRootTable;
+uint32_t x86KSnumIOPTLevels;
+uint32_t x86KSnumIODomainIDBits;
+uint32_t x86KSFirstValidIODomain;
 #endif
 
-#if defined DEBUG || defined RELEASE_PRINTF
-uint16_t ia32KSconsolePort;
-uint16_t ia32KSdebugPort;
+#ifdef CONFIG_VTX
+UP_STATE_DEFINE(vcpu_t *, x86KSCurrentVCPU);
 #endif
+
+#ifdef CONFIG_PRINTING
+uint16_t x86KSconsolePort;
+#endif
+#ifdef CONFIG_DEBUG_BUILD
+uint16_t x86KSdebugPort;
+#endif
+
+/* State data tracking what IRQ source is related to each
+ * CPU vector */
+x86_irq_state_t x86KSIRQState[maxIRQ + 1];
+
+word_t x86KSAllocatedIOPorts[NUM_IO_PORTS / CONFIG_WORD_SIZE];

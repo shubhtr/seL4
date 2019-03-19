@@ -15,55 +15,37 @@
 #define CR0_EMULATION       BIT(2)  /* Enable OS emulation of FPU. */
 #define CR0_TASK_SWITCH     BIT(3)  /* Trap on any FPU usage, for lazy FPU. */
 #define CR0_NUMERIC_ERROR   BIT(5)  /* Internally handle FPU problems. */
+#define CR0_WRITE_PROTECT   BIT(16) /* Write protection in supervisor mode. */
+#define CR4_PCE             BIT(8)  /* Performance-Monitoring Counter enable. */
 #define CR4_OSFXSR          BIT(9)  /* Enable SSE et. al. features. */
 #define CR4_OSXMMEXCPT      BIT(10) /* Enable SSE exceptions. */
+#define CR4_OSXSAVE         BIT(18) /* Enavle XSAVE feature set */
+#define CR4_VMXE            BIT(13) /* Enable VMX mode. */
+#define CR4_SMEP            BIT(20) /* Supervisor Mode Execution Prevention. */
+#define CR4_SMAP            BIT(21) /* Supervisor Mode Access Prevention. */
+
+#define FLAGS_TF            BIT(8)  /* Trap Flag */
+#define FLAGS_IF            BIT(9)  /* Interrupt enable Flag */
+#define FLAGS_HIGH          BIT(1)  /* Bits in the FLAGS register that must be high */
+#define FLAGS_LOW           (BIT(3) | BIT(5)) /* Bits in the FLAGS register that must be low */
+#define FLAGS_MASK          MASK(12)/* Only the first 12 bits of the FLAGS are used, rest should be zero */
+#define FLAGS_USER_DEFAULT  FLAGS_IF | FLAGS_HIGH
 
 /* We use a dummy variable to synchronize reads and writes to the control registers.
  * this allows us to write inline asm blocks that do not have enforced memory
  * clobbers for ordering. */
-static unsigned long __control_reg_order;
+static unsigned long control_reg_order;
 
-static inline unsigned long read_cr3(void)
+#include <mode/machine/cpu_registers.h>
+
+static inline void xsetbv(uint32_t reg, uint64_t value)
 {
-    unsigned long val;
-    asm volatile("movl %%cr3, %0" : "=r"(val), "=m"(__control_reg_order));
-    return val;
+    asm volatile("xsetbv" :: "d"((uint32_t)(value >> 32)), "a"((uint32_t)(value & 0xffffffff)), "c"(reg), "m"(control_reg_order));
 }
 
-static inline void write_cr3(unsigned long val)
+static inline void write_xcr0(uint64_t value)
 {
-    asm volatile("movl %0, %%cr3" :: "r"(val), "m"(__control_reg_order));
-}
-
-static inline unsigned long read_cr0(void)
-{
-    unsigned long val;
-    asm volatile("movl %%cr0, %0" : "=r"(val), "=m"(__control_reg_order));
-    return val;
-}
-
-static inline void write_cr0(unsigned long val)
-{
-    asm volatile("movl %0, %%cr0" :: "r"(val), "m"(__control_reg_order));
-}
-
-static inline unsigned long read_cr2(void)
-{
-    unsigned long val;
-    asm volatile("movl %%cr2, %0" : "=r"(val), "=m"(__control_reg_order));
-    return val;
-}
-
-static inline unsigned long read_cr4(void)
-{
-    unsigned long val;
-    asm volatile("movl %%cr4, %0" : "=r"(val), "=m"(__control_reg_order));
-    return val;
-}
-
-static inline void write_cr4(unsigned long value)
-{
-    asm volatile("movl %0, %%cr4" :: "r"(value), "m"(__control_reg_order));
+    xsetbv(0, value);
 }
 
 #endif

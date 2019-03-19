@@ -15,11 +15,10 @@
 #include <machine/io.h>
 #include <arch/machine.h>
 
-void
-handleFault(tcb_t *tptr)
+void handleFault(tcb_t *tptr)
 {
     exception_t status;
-    fault_t fault = current_fault;
+    seL4_Fault_t fault = current_fault;
 
     status = sendFaultIPC(tptr);
     if (status != EXCEPTION_NONE) {
@@ -27,8 +26,7 @@ handleFault(tcb_t *tptr)
     }
 }
 
-exception_t
-sendFaultIPC(tcb_t *tptr)
+exception_t sendFaultIPC(tcb_t *tptr)
 {
     cptr_t handlerCPtr;
     cap_t  handlerCap;
@@ -40,59 +38,59 @@ sendFaultIPC(tcb_t *tptr)
     handlerCPtr = tptr->tcbFaultHandler;
     lu_ret = lookupCap(tptr, handlerCPtr);
     if (lu_ret.status != EXCEPTION_NONE) {
-        current_fault = fault_cap_fault_new(handlerCPtr, false);
+        current_fault = seL4_Fault_CapFault_new(handlerCPtr, false);
         return EXCEPTION_FAULT;
     }
     handlerCap = lu_ret.cap;
 
     if (cap_get_capType(handlerCap) == cap_endpoint_cap &&
-            cap_endpoint_cap_get_capCanSend(handlerCap) &&
-            cap_endpoint_cap_get_capCanGrant(handlerCap)) {
+        cap_endpoint_cap_get_capCanSend(handlerCap) &&
+        (cap_endpoint_cap_get_capCanGrant(handlerCap) ||
+         cap_endpoint_cap_get_capCanGrantReply(handlerCap))) {
         tptr->tcbFault = current_fault;
-        if (fault_get_faultType(current_fault) == fault_cap_fault) {
+        if (seL4_Fault_get_seL4_FaultType(current_fault) == seL4_Fault_CapFault) {
             tptr->tcbLookupFailure = original_lookup_fault;
         }
-        sendIPC(true, false,
+        sendIPC(true, true,
                 cap_endpoint_cap_get_capEPBadge(handlerCap),
-                true, tptr,
+                cap_endpoint_cap_get_capCanGrant(handlerCap), true, tptr,
                 EP_PTR(cap_endpoint_cap_get_capEPPtr(handlerCap)));
 
         return EXCEPTION_NONE;
     } else {
-        current_fault = fault_cap_fault_new(handlerCPtr, false);
+        current_fault = seL4_Fault_CapFault_new(handlerCPtr, false);
         current_lookup_fault = lookup_fault_missing_capability_new(0);
 
         return EXCEPTION_FAULT;
     }
 }
 
-#ifdef DEBUG
-static void
-print_fault(fault_t f)
+#ifdef CONFIG_PRINTING
+static void print_fault(seL4_Fault_t f)
 {
-    switch (fault_get_faultType(f)) {
-    case fault_null_fault:
+    switch (seL4_Fault_get_seL4_FaultType(f)) {
+    case seL4_Fault_NullFault:
         printf("null fault");
         break;
-    case fault_cap_fault:
-        printf("cap fault in %s phase at address 0x%x",
-               fault_cap_fault_get_inReceivePhase(f) ? "receive" : "send",
-               (unsigned int)fault_cap_fault_get_address(f));
+    case seL4_Fault_CapFault:
+        printf("cap fault in %s phase at address %p",
+               seL4_Fault_CapFault_get_inReceivePhase(f) ? "receive" : "send",
+               (void *)seL4_Fault_CapFault_get_address(f));
         break;
-    case fault_vm_fault:
-        printf("vm fault on %s at address 0x%x with status 0x%x",
-               fault_vm_fault_get_instructionFault(f) ? "code" : "data",
-               (unsigned int)fault_vm_fault_get_address(f),
-               (unsigned int)fault_vm_fault_get_FSR(f));
+    case seL4_Fault_VMFault:
+        printf("vm fault on %s at address %p with status %p",
+               seL4_Fault_VMFault_get_instructionFault(f) ? "code" : "data",
+               (void *)seL4_Fault_VMFault_get_address(f),
+               (void *)seL4_Fault_VMFault_get_FSR(f));
         break;
-    case fault_unknown_syscall:
-        printf("unknown syscall 0x%x",
-               (unsigned int)fault_unknown_syscall_get_syscallNumber(f));
+    case seL4_Fault_UnknownSyscall:
+        printf("unknown syscall %p",
+               (void *)seL4_Fault_UnknownSyscall_get_syscallNumber(f));
         break;
-    case fault_user_exception:
-        printf("user exception 0x%x code 0x%x",
-               (unsigned int)fault_user_exception_get_number(f),
-               (unsigned int)fault_user_exception_get_code(f));
+    case seL4_Fault_UserException:
+        printf("user exception %p code %p",
+               (void *)seL4_Fault_UserException_get_number(f),
+               (void *)seL4_Fault_UserException_get_code(f));
         break;
     default:
         printf("unknown fault");
@@ -102,17 +100,22 @@ print_fault(fault_t f)
 #endif
 
 /* The second fault, ex2, is stored in the global current_fault */
-void
-handleDoubleFault(tcb_t *tptr, fault_t ex1)
+void handleDoubleFault(tcb_t *tptr, seL4_Fault_t ex1)
 {
-#ifdef DEBUG
-    fault_t ex2 = current_fault;
+#ifdef CONFIG_PRINTING
+    seL4_Fault_t ex2 = current_fault;
     printf("Caught ");
     print_fault(ex2);
     printf("\nwhile trying to handle:\n");
     print_fault(ex1);
-    printf("\nin thread 0x%x \"%s\" ", (unsigned int)tptr, tptr->tcbName);
-    printf("at address 0x%x\n", (unsigned int)getRestartPC(tptr));
+
+#ifdef CONFIG_DEBUG_BUILD
+    printf("\nin thread %p \"%s\" ", tptr, tptr->tcbName);
+#endif /* CONFIG_DEBUG_BUILD */
+
+    printf("at address %p\n", (void *)getRestartPC(tptr));
+    printf("With stack:\n");
+    Arch_userStackTrace(tptr);
 #endif
 
     setThreadState(tptr, ThreadState_Inactive);
